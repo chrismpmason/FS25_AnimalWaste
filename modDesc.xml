@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<modDesc descVersion="108">
+    <author>Chris Mason (Hartwell Farm)</author>
+    <version>0.1.0.1</version>
+    <title>
+        <en>Animal Waste Production Rate</en>
+    </title>
+    <iconFilename>icon_animalWaste.dds</iconFilename>
+    <description>
+        <en><![CDATA[
+Set how quickly your cow sheds produce manure and liquid manure.
+Straw consumption scales at the same rate.
+
+In the in-game Settings page you'll find a new row,
+"Husbandry Production Rate" - pick 1x, 2x, or 3x. The choice
+is saved per-savegame and applies on the next in-game hour.
+
+Plays nicely with Realistic Livestock - the two mods touch
+different parts of the husbandry pipeline and don't conflict.
+
+v0.1 - cows only. Singleplayer only.
+        ]]></en>
+    </description>
+
+    <multiplayer supported="false"/>
+
+    <extraSourceFiles>
+        <sourceFile filename="scripts/AnimalWaste.lua"/>
+    </extraSourceFiles>
+
+    <l10n filenamePrefix="i18n/l10n"/>
+</modDesc>

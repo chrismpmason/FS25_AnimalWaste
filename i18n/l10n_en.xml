@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="no" ?>
+<l10n>
+    <texts>
+        <text name="aw_settings"                                  text="Animal Waste"/>
+        <text name="aw_settings_husbandryProductionRate_label"    text="Husbandry Production Rate"/>
+        <text name="aw_settings_husbandryProductionRate_tooltip"  text="Multiplies manure and liquid manure output (and straw consumption) on your cow sheds. Change applies on the next in-game hour."/>
+        <text name="aw_settings_husbandryProductionRate_texts_1"  text="1x"/>
+        <text name="aw_settings_husbandryProductionRate_texts_2"  text="2x"/>
+        <text name="aw_settings_husbandryProductionRate_texts_3"  text="3x"/>
+    </texts>
+</l10n>

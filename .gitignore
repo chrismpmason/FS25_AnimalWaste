@@ -1,0 +1,29 @@
+# Internal planning / design docs — stay local, never push
+dev_notes.md
+v0.1_DESIGN.md
+v0.1_SETTINGS_INTEGRATION.md
+
+# ModHub-specific artifacts — for the ModHub portal, not the GitHub repo
+MODHUB_DESCRIPTION.txt
+MODHUB_CHECKLIST.md
+
+# Built mod zip — goes in GitHub Releases, not in the source tree.
+# Regenerate locally with `powershell -ExecutionPolicy Bypass -File .\build.ps1`.
+FS25_AnimalWaste.zip
+*.zip
+
+# FS25 log file if it ends up next to the project for some reason
+log.txt
+
+# Editor / OS clutter
+.vscode/
+.vs/
+.idea/
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Backups, temp files
+*.bak
+*.tmp
+*~
