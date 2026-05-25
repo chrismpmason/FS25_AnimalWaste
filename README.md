@@ -24,9 +24,12 @@ Once in-game, hit `Esc` → **Settings** and scroll down. You'll find a new sect
 ## Compatibility
 
 - **Realistic Livestock (Ritter fork)**: confirmed compatible. The two mods touch different parts of the husbandry pipeline. Tested on a heavily-modded Oakwell save with RL active.
+- **Red Tape (Ozz)**: confirmed compatible (audited against v1.0.2.4). The two mods hook different parts of the husbandry pipeline and don't conflict. See the gameplay note below for how the multiplier interacts with Red Tape's policies.
 - **BetterHusbandry, Realistic Milking Time, etc.**: not explicitly tested but no reason to expect a conflict — none of them touch the spec function this mod hooks. If you find a conflict, file an issue.
 - **Cow sheds only**: pigs, horses, sheep and chickens stay vanilla in v0.1. Other animals are on the roadmap, not in this release.
 - **Singleplayer only** for v0.1. The mod's modDesc declares `multiplayer supported="false"` so the game won't let you load it in MP.
+
+**Running with Red Tape:** AnimalWaste's multiplier stacks naturally with Red Tape's policies. The slurry-pit full penalty fires roughly N× as often at N× multiplier (because you fill a fixed-capacity pit faster — realistic). The manure-spreading threshold policy is ratio-based, so it doesn't fire more often. If you're running AnimalWaste at 2x or 3x with Red Tape, plan a larger slurry pit and a tighter spreading schedule — that's the trade-off.
 
 ## Known issues / things to keep an eye on
 
