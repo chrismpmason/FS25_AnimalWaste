@@ -29,6 +29,8 @@ Once in-game, hit `Esc` → **Settings** and scroll down. You'll find a new sect
 - **Cow sheds only**: pigs, horses, sheep and chickens stay vanilla in v0.1. Other animals are on the roadmap, not in this release.
 - **Singleplayer only** for v0.1. The mod's modDesc declares `multiplayer supported="false"` so the game won't let you load it in MP.
 
+**Running with Realistic Livestock:** Note: when running with Realistic Livestock, RL's 'Products per day' panel will continue to show vanilla (1x) production predictions even when AnimalWaste is set to 2x or 3x. This is a cosmetic display mismatch - the actual production rates DO scale correctly (verify by watching your manure storage fill level). RL's display calculates its prediction from a different point in the husbandry code than where AnimalWaste applies its multiplier, so the two paths don't meet. The storage fill rate is the ground truth.
+
 **Running with Red Tape:** AnimalWaste's multiplier stacks naturally with Red Tape's policies. The slurry-pit full penalty fires roughly N× as often at N× multiplier (because you fill a fixed-capacity pit faster — realistic). The manure-spreading threshold policy is ratio-based, so it doesn't fire more often. If you're running AnimalWaste at 2x or 3x with Red Tape, plan a larger slurry pit and a tighter spreading schedule — that's the trade-off.
 
 ## Known issues / things to keep an eye on
