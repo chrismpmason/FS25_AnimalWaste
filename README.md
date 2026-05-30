@@ -2,7 +2,7 @@
 
 A small Farming Simulator 25 mod that lets you scale up cow-shed manure and liquid manure production. Pick 1x, 2x or 3x.
 
-> **⚠ Public beta (v0.1.0.1).** This is the first release out in the wild. Tested on my own save and it behaves, but the second pair of eyes are yours. Please file anything odd via [GitHub Issues](https://github.com/chrismpmason/FS25_AnimalWaste/issues) — small details welcome (game version, other mods active, what you did, what you saw).
+> **⚠ Public beta (v0.1.0.2).** v0.1.0.2 fixes a significant bug: earlier builds silently stopped milk production on cow sheds (see Known issues below) — please update. Tested on my own save and it behaves, but the second pair of eyes are yours. Please file anything odd via [GitHub Issues](https://github.com/chrismpmason/FS25_AnimalWaste/issues) — small details welcome (game version, other mods active, what you did, what you saw).
 
 ## What it does
 
@@ -25,7 +25,7 @@ Once in-game, hit `Esc` → **Settings** and scroll down. You'll find a new sect
 
 - **Realistic Livestock (Ritter fork)**: confirmed compatible. The two mods touch different parts of the husbandry pipeline. Tested on a heavily-modded Oakwell save with RL active.
 - **Red Tape (Ozz)**: confirmed compatible (audited against v1.0.2.4). The two mods hook different parts of the husbandry pipeline and don't conflict. See the gameplay note below for how the multiplier interacts with Red Tape's policies.
-- **BetterHusbandry, Realistic Milking Time, etc.**: not explicitly tested but no reason to expect a conflict — none of them touch the spec function this mod hooks. If you find a conflict, file an issue.
+- **BetterHusbandry, Realistic Milking Time, etc.**: not explicitly tested but no reason to expect a conflict — as of v0.1.0.2 this mod no longer overwrites any husbandry production function. It only appends to the husbandry's hourly update and tops up the extra manure / liquid manure in storage, so it stays clear of the milk and other output paths entirely. If you find a conflict, file an issue.
 - **Cow sheds only**: pigs, horses, sheep and chickens stay vanilla in v0.1. Other animals are on the roadmap, not in this release.
 - **Singleplayer only** for v0.1. The mod's modDesc declares `multiplayer supported="false"` so the game won't let you load it in MP.
 
@@ -36,7 +36,7 @@ Once in-game, hit `Esc` → **Settings** and scroll down. You'll find a new sect
 ## Known issues / things to keep an eye on
 
 - If you change the multiplier mid-save, the new rate applies on the next in-game hourly tick, not immediately. This is by design (production is hourly) but can feel like nothing happened for a minute.
-- The mod silently swallows a pre-existing engine-side error in `PlaceableHusbandryMilk.updateOutput` that fires on some cow-shed configurations. This isn't caused by this mod — vanilla + RL together trigger it — but you might see the error in your `log.txt` next to this mod's lines. Manure scaling still works through it.
+- **Fixed in v0.1.0.2 — milk stopping on cow sheds.** Earlier builds (v0.1.0.1) overwrote a shared husbandry production function, and as a side effect silently zeroed milk output on cow sheds. Manure and liquid manure kept scaling, so it was easy to miss, and it showed up as `PlaceableHusbandryMilk.updateOutput` errors in `log.txt`. To be clear: this **was** caused by this mod — not by vanilla or Realistic Livestock, as v0.1.0.1's notes wrongly claimed. v0.1.0.2 fixes it by no longer touching the production chain at all (it now appends to the hourly update instead). If you ran v0.1.0.1 with cows, update to v0.1.0.2 and milk returns to normal.
 - If anything else looks off — manure not scaling, settings row missing, errors with the `[FS25_AnimalWaste]` prefix in `log.txt` — please file an issue with the log snippet.
 
 ## Reporting bugs / requesting features
@@ -44,7 +44,7 @@ Once in-game, hit `Esc` → **Settings** and scroll down. You'll find a new sect
 [GitHub Issues](https://github.com/chrismpmason/FS25_AnimalWaste/issues). Please include:
 
 - FS25 version
-- Mod version (currently 0.1.0.1)
+- Mod version (currently 0.1.0.2)
 - Other mods you have active (especially anything husbandry-related)
 - The relevant lines from `log.txt` (filter for `[FS25_AnimalWaste]`)
 - What you expected vs. what happened
