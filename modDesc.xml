@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no" ?>
 <modDesc descVersion="108">
     <author>Chris Mason (Hartwell Farm)</author>
-    <version>0.1.0.1</version>
+    <version>0.2.0.1</version>
     <title>
         <en>Animal Waste Production Rate</en>
     </title>
@@ -22,9 +22,10 @@ v0.1 - cows only. Singleplayer only.
         ]]></en>
     </description>
 
-    <multiplayer supported="false"/>
+    <multiplayer supported="true"/>
 
     <extraSourceFiles>
+        <sourceFile filename="scripts/AnimalWasteSettingsEvent.lua"/>
         <sourceFile filename="scripts/AnimalWaste.lua"/>
     </extraSourceFiles>
 

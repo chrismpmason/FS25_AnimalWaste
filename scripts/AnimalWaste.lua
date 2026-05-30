@@ -7,7 +7,7 @@
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
-AnimalWaste.VERSION  = "0.1.0.1"
+AnimalWaste.VERSION  = "0.2.0.1"
 
 -- Current scale factor. Updated by the Settings click callback and by
 -- loadFromXML. Defaults to 1x (pass-through) until either fires.
@@ -98,49 +98,76 @@ end
 
 
 -- ---------------------------------------------------------------------
--- Hook wrappers — scale spec field, call super, restore.
+-- Hook wrappers.
+--
+-- updateOutput is a SHARED chained specialization function: milk, manure,
+-- liquid manure, straw and every other husbandry output each register a link
+-- and call superFunc to run the next one down the chain. Milk production is
+-- therefore just another link reached *through* superFunc -- not something
+-- this mod owns.
+--
+-- The earlier approach scaled our own spec field, then ran the entire chain
+-- inside pcall() and threw the result away. The manure/slurry our link emits
+-- happens BEFORE it hands control on via superFunc, so that part survived --
+-- but the milk link further down the chain did not: any interruption inside
+-- that swallowing pcall (a downstream error, or another mod that relies on the
+-- call being clean) silently dropped milk. That is exactly why milk fell to
+-- zero whenever the multiplier was > 1, yet manure kept flowing.
+--
+-- The safe approach used below: run the real chain FIRST, completely untouched,
+-- so milk and every other output behave exactly as if this mod were absent.
+-- Then add only the extra (M-1)x of manure / liquid manure on top, mirroring
+-- the base game's own straw->manure and liquid-manure maths. Our scaling can no
+-- longer touch the milk link, because it never wraps it.
 -- ---------------------------------------------------------------------
 
 local function wrappedStrawUpdateOutput(self, superFunc, foodFactor, productionFactor, globalProductionFactor)
+    -- Real chain first: vanilla consumes 1x straw and emits 1x manure here, and
+    -- milk + every other output link runs exactly as without this mod.
+    local result = superFunc(self, foodFactor, productionFactor, globalProductionFactor)
+
     local M = AnimalWaste.multiplier or 1
-    if not self.isServer or M == 1 or not isCowHusbandry(self) then
-        return superFunc(self, foodFactor, productionFactor, globalProductionFactor)
+    if self.isServer and M > 1 and isCowHusbandry(self) then
+        local spec = self.spec_husbandryStraw
+        if spec ~= nil
+                and spec.inputLitersPerHour ~= nil and spec.inputLitersPerHour > 0
+                and spec.outputLitersPerHour ~= nil and spec.outputLitersPerHour > 0 then
+            -- Add the remaining (M-1)x: consume that much more straw and emit the
+            -- matching manure, using the same delta/ratio maths as the base game.
+            local timeAdjustment = g_currentMission.environment.timeAdjustment
+            local extraStraw = spec.inputLitersPerHour * (M - 1) * timeAdjustment
+            local consumed = extraStraw - self:removeHusbandryFillLevel(self:getOwnerFarmId(), extraStraw, spec.inputFillType)
+            if consumed > 0 then
+                local extraManure = foodFactor * spec.outputLitersPerHour * (consumed / extraStraw) * timeAdjustment
+                if extraManure > 0 then
+                    self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extraManure, spec.outputFillType, nil, nil, nil)
+                end
+            end
+            self:updateStrawPlane()
+        end
     end
 
-    local spec = self.spec_husbandryStraw
-    if spec == nil or spec.inputLitersPerHour == nil or spec.outputLitersPerHour == nil then
-        return superFunc(self, foodFactor, productionFactor, globalProductionFactor)
-    end
-
-    local origIn  = spec.inputLitersPerHour
-    local origOut = spec.outputLitersPerHour
-    spec.inputLitersPerHour  = origIn  * M
-    spec.outputLitersPerHour = origOut * M
-
-    pcall(superFunc, self, foodFactor, productionFactor, globalProductionFactor)
-
-    spec.inputLitersPerHour  = origIn
-    spec.outputLitersPerHour = origOut
+    return result
 end
 
 
 local function wrappedLiquidManureUpdateOutput(self, superFunc, foodFactor, productionFactor, globalProductionFactor)
+    -- Real chain first (1x liquid manure + milk + everything else), untouched.
+    local result = superFunc(self, foodFactor, productionFactor, globalProductionFactor)
+
     local M = AnimalWaste.multiplier or 1
-    if not self.isServer or M == 1 or not isCowHusbandry(self) then
-        return superFunc(self, foodFactor, productionFactor, globalProductionFactor)
+    if self.isServer and M > 1 and isCowHusbandry(self) then
+        local spec = self.spec_husbandryLiquidManure
+        if spec ~= nil and spec.litersPerHour ~= nil and spec.litersPerHour > 0 then
+            -- Vanilla emitted foodFactor * litersPerHour * timeAdjustment; add (M-1)x more.
+            local extra = foodFactor * spec.litersPerHour * (M - 1) * g_currentMission.environment.timeAdjustment
+            if extra > 0 then
+                self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extra, spec.fillType, nil, nil, nil)
+            end
+        end
     end
 
-    local spec = self.spec_husbandryLiquidManure
-    if spec == nil or spec.litersPerHour == nil then
-        return superFunc(self, foodFactor, productionFactor, globalProductionFactor)
-    end
-
-    local orig = spec.litersPerHour
-    spec.litersPerHour = orig * M
-
-    pcall(superFunc, self, foodFactor, productionFactor, globalProductionFactor)
-
-    spec.litersPerHour = orig
+    return result
 end
 
 
@@ -322,6 +349,49 @@ function AnimalWaste.onSettingChanged(_, state, button)
 
     setting.state = state
     if setting.callback then setting.callback(name, setting.values[state]) end
+
+    -- Multiplayer: if we're the host, push the change out to all clients so
+    -- their menus track ours. Only the host changes the setting (client lock is
+    -- a later task); the host gate makes this a no-op in SP and on clients.
+    if name == "husbandryProductionRate" and AnimalWaste.isMultiplayerHost() then
+        AnimalWasteSettingsEvent.broadcast(state)
+    end
+end
+
+
+-- ---------------------------------------------------------------------
+-- Multiplayer value sync (server <-> client). Simulation stays server-side;
+-- this only keeps the client's displayed value in step with the host.
+-- ---------------------------------------------------------------------
+
+-- True only on the hosting server of a multiplayer session. False in
+-- single-player and on clients -- gates all outbound event traffic.
+function AnimalWaste.isMultiplayerHost()
+    return g_currentMission ~= nil
+        and g_currentMission.missionDynamicInfo ~= nil
+        and g_currentMission.missionDynamicInfo.isMultiplayer
+        and g_currentMission.getIsServer ~= nil
+        and g_currentMission:getIsServer()
+end
+
+
+-- Client-side: apply a state pushed from the server and refresh the menu row
+-- if it has been built. Does not re-broadcast (clients never send), and
+-- setState without forceEvent does not re-fire onSettingChanged -- so there is
+-- no echo loop back to the host.
+function AnimalWaste:applySyncedState(state)
+    local setting = AnimalWaste.SETTINGS.husbandryProductionRate
+    if setting == nil then return end
+    if state == nil or state < 1 or state > #setting.values then return end
+
+    setting.state = state
+    AnimalWaste.multiplier = setting.values[state]
+
+    if setting.element ~= nil then
+        setting.element:setState(state)
+    end
+
+    log("multiplier synced to %sx (state %s)", tostring(AnimalWaste.multiplier), tostring(state))
 end
 
 
@@ -353,6 +423,23 @@ if FSBaseMission ~= nil and FSBaseMission.saveSavegame ~= nil then
     FSBaseMission.saveSavegame = Utils.appendedFunction(
         FSBaseMission.saveSavegame,
         function(self) AnimalWaste:saveToXML() end)
+end
+
+-- Multiplayer join sync: when a client finishes loading on the server, push the
+-- current setting to just that client so its menu opens on the right number.
+-- onConnectionFinishedLoading is the server-side per-client "ready" hook.
+if FSBaseMission ~= nil and FSBaseMission.onConnectionFinishedLoading ~= nil then
+    FSBaseMission.onConnectionFinishedLoading = Utils.appendedFunction(
+        FSBaseMission.onConnectionFinishedLoading,
+        function(mission, connection)
+            if not AnimalWaste.isMultiplayerHost() then return end
+            local setting = AnimalWaste.SETTINGS.husbandryProductionRate
+            local state = (setting and (setting.state or setting.default)) or 1
+            AnimalWasteSettingsEvent.sendToClient(connection, state)
+        end)
+else
+    Logging.error("[%s] FSBaseMission.onConnectionFinishedLoading missing; MP join-sync disabled",
+                  AnimalWaste.MOD_NAME)
 end
 
 addModEventListener(AnimalWaste)
