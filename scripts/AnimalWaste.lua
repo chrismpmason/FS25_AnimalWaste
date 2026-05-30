@@ -7,7 +7,7 @@
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
-AnimalWaste.VERSION  = "0.2.0.1"
+AnimalWaste.VERSION  = "0.2.0.2"
 
 -- Current scale factor. Updated by the Settings click callback and by
 -- loadFromXML. Defaults to 1x (pass-through) until either fires.
@@ -98,99 +98,105 @@ end
 
 
 -- ---------------------------------------------------------------------
--- Hook wrappers.
+-- Manure / liquid-manure scaling.
 --
--- updateOutput is a SHARED chained specialization function: milk, manure,
--- liquid manure, straw and every other husbandry output each register a link
--- and call superFunc to run the next one down the chain. Milk production is
--- therefore just another link reached *through* superFunc -- not something
--- this mod owns.
+-- DO NOT hook PlaceableHusbandry*.updateOutput. It is a chained,
+-- super-injected specialization method: the base game registers it with
+-- SpecializationUtil.registerOverwrittenFunction, and milk, manure, liquid
+-- manure and straw are all links in that single chain, each called as
+-- fn(self, superFunc, foodFactor, productionFactor, globalProductionFactor).
 --
--- The earlier approach scaled our own spec field, then ran the entire chain
--- inside pcall() and threw the result away. The manure/slurry our link emits
--- happens BEFORE it hands control on via superFunc, so that part survived --
--- but the milk link further down the chain did not: any interruption inside
--- that swallowing pcall (a downstream error, or another mod that relies on the
--- call being clean) silently dropped milk. That is exactly why milk fell to
--- zero whenever the multiplier was > 1, yet manure kept flowing.
+-- Wrapping it with Utils.overwrittenFunction stacks a SECOND super-injection on
+-- top of the engine's. The two shift every argument one slot to the right: our
+-- wrapper receives the chain's super-function where it expects foodFactor, and
+-- the real globalProductionFactor falls off the end into an ignored vararg and
+-- arrives down-chain as nil. Manure/slurry survive (they multiply by
+-- foodFactor, which still lands correctly); milk is the only spec that
+-- multiplies by globalProductionFactor, so milk crashes on
+-- "mul on number and nil" at PlaceableHusbandryMilk.updateOutput. That one
+-- defect caused every milk failure this mod has had -- silent while the bad
+-- call was hidden in a pcall, then a per-frame crash once it was not.
 --
--- The safe approach used below: run the real chain FIRST, completely untouched,
--- so milk and every other output behave exactly as if this mod were absent.
--- Then add only the extra (M-1)x of manure / liquid manure on top, mirroring
--- the base game's own straw->manure and liquid-manure maths. Our scaling can no
--- longer touch the milk link, because it never wraps it.
+-- So we stay entirely out of the production chain. We append to the husbandry's
+-- onHourChanged event (a plain event listener: appendedFunction runs after the
+-- original with the same args and NO super-injection, so nothing can shift).
+-- By the time it runs, the vanilla cycle has already produced one hour of milk,
+-- manure and slurry. We then top up only the extra (M-1)x of manure and liquid
+-- manure straight to storage. We never read, write, or run inside any milk
+-- value or the updateOutput chain, so milk is physically untouchable here.
 -- ---------------------------------------------------------------------
 
-local function wrappedStrawUpdateOutput(self, superFunc, foodFactor, productionFactor, globalProductionFactor)
-    -- Real chain first: vanilla consumes 1x straw and emits 1x manure here, and
-    -- milk + every other output link runs exactly as without this mod.
-    local result = superFunc(self, foodFactor, productionFactor, globalProductionFactor)
+-- Extra (M-1)x liquid manure, mirroring vanilla's foodFactor * litersPerHour.
+local function addExtraLiquidManure(self, M, foodFactor, timeAdjustment)
+    local spec = self.spec_husbandryLiquidManure
+    if spec == nil or spec.litersPerHour == nil or spec.litersPerHour <= 0 then return end
 
-    local M = AnimalWaste.multiplier or 1
-    if self.isServer and M > 1 and isCowHusbandry(self) then
-        local spec = self.spec_husbandryStraw
-        if spec ~= nil
-                and spec.inputLitersPerHour ~= nil and spec.inputLitersPerHour > 0
-                and spec.outputLitersPerHour ~= nil and spec.outputLitersPerHour > 0 then
-            -- Add the remaining (M-1)x: consume that much more straw and emit the
-            -- matching manure, using the same delta/ratio maths as the base game.
-            local timeAdjustment = g_currentMission.environment.timeAdjustment
-            local extraStraw = spec.inputLitersPerHour * (M - 1) * timeAdjustment
-            local consumed = extraStraw - self:removeHusbandryFillLevel(self:getOwnerFarmId(), extraStraw, spec.inputFillType)
-            if consumed > 0 then
-                local extraManure = foodFactor * spec.outputLitersPerHour * (consumed / extraStraw) * timeAdjustment
-                if extraManure > 0 then
-                    self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extraManure, spec.outputFillType, nil, nil, nil)
-                end
-            end
-            self:updateStrawPlane()
-        end
+    local extra = foodFactor * spec.litersPerHour * (M - 1) * timeAdjustment
+    if extra > 0 then
+        self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extra, spec.fillType, nil, nil, nil)
     end
-
-    return result
 end
 
-
-local function wrappedLiquidManureUpdateOutput(self, superFunc, foodFactor, productionFactor, globalProductionFactor)
-    -- Real chain first (1x liquid manure + milk + everything else), untouched.
-    local result = superFunc(self, foodFactor, productionFactor, globalProductionFactor)
-
-    local M = AnimalWaste.multiplier or 1
-    if self.isServer and M > 1 and isCowHusbandry(self) then
-        local spec = self.spec_husbandryLiquidManure
-        if spec ~= nil and spec.litersPerHour ~= nil and spec.litersPerHour > 0 then
-            -- Vanilla emitted foodFactor * litersPerHour * timeAdjustment; add (M-1)x more.
-            local extra = foodFactor * spec.litersPerHour * (M - 1) * g_currentMission.environment.timeAdjustment
-            if extra > 0 then
-                self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extra, spec.fillType, nil, nil, nil)
-            end
-        end
+-- Extra (M-1)x straw consumption + matching manure, mirroring vanilla's
+-- straw->manure delta maths for the extra portion only.
+local function addExtraManure(self, M, foodFactor, timeAdjustment)
+    local spec = self.spec_husbandryStraw
+    if spec == nil
+            or spec.inputLitersPerHour == nil or spec.inputLitersPerHour <= 0
+            or spec.outputLitersPerHour == nil or spec.outputLitersPerHour <= 0 then
+        return
     end
 
-    return result
+    local extraStraw = spec.inputLitersPerHour * (M - 1) * timeAdjustment
+    if extraStraw <= 0 then return end
+
+    local consumed = extraStraw - self:removeHusbandryFillLevel(self:getOwnerFarmId(), extraStraw, spec.inputFillType)
+    if consumed > 0 then
+        local extraManure = foodFactor * spec.outputLitersPerHour * (consumed / extraStraw) * timeAdjustment
+        if extraManure > 0 then
+            self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extraManure, spec.outputFillType, nil, nil, nil)
+        end
+        self:updateStrawPlane()
+    end
+end
+
+-- Appended to PlaceableHusbandry.onHourChanged. Runs once per in-game hour,
+-- AFTER the base cycle has produced its 1x of everything (milk included).
+local function onHourChangedAddExtraWaste(self, currentHour)
+    if not self.isServer then return end
+
+    local M = AnimalWaste.multiplier or 1
+    if M == 1 or not isCowHusbandry(self) then return end
+
+    local husbandrySpec = self.spec_husbandry
+    if husbandrySpec == nil then return end
+
+    -- The base updateProduction stored this hour's foodFactor here; it is the
+    -- same value vanilla used to size the 1x manure/slurry we are scaling.
+    local foodFactor = husbandrySpec.productionFactor
+    if foodFactor == nil or foodFactor <= 0 then return end
+
+    local timeAdjustment = g_currentMission.environment.timeAdjustment
+
+    addExtraManure(self, M, foodFactor, timeAdjustment)
+    addExtraLiquidManure(self, M, foodFactor, timeAdjustment)
 end
 
 
 function AnimalWaste:installHooks()
-    if PlaceableHusbandryStraw == nil or PlaceableHusbandryStraw.updateOutput == nil then
-        Logging.error("[%s] PlaceableHusbandryStraw.updateOutput missing; mod will not scale straw/manure",
-                      AnimalWaste.MOD_NAME)
-        return false
-    end
-    if PlaceableHusbandryLiquidManure == nil or PlaceableHusbandryLiquidManure.updateOutput == nil then
-        Logging.error("[%s] PlaceableHusbandryLiquidManure.updateOutput missing; mod will not scale liquid manure",
+    if PlaceableHusbandry == nil or PlaceableHusbandry.onHourChanged == nil then
+        Logging.error("[%s] PlaceableHusbandry.onHourChanged missing; mod will not scale manure/slurry",
                       AnimalWaste.MOD_NAME)
         return false
     end
 
-    PlaceableHusbandryStraw.updateOutput = Utils.overwrittenFunction(
-        PlaceableHusbandryStraw.updateOutput, wrappedStrawUpdateOutput)
-
-    PlaceableHusbandryLiquidManure.updateOutput = Utils.overwrittenFunction(
-        PlaceableHusbandryLiquidManure.updateOutput, wrappedLiquidManureUpdateOutput)
+    -- Append (never overwrite) so we run after the untouched production cycle
+    -- and never become a super-injected link in any husbandry chain.
+    PlaceableHusbandry.onHourChanged = Utils.appendedFunction(
+        PlaceableHusbandry.onHourChanged, onHourChangedAddExtraWaste)
 
     AnimalWaste.hooksInstalled = true
-    log("hooks installed")
+    log("hooks installed (onHourChanged extra-waste append)")
     return true
 end
 
