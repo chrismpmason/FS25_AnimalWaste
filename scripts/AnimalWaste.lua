@@ -7,7 +7,7 @@
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
-AnimalWaste.VERSION  = "0.1.0.2"
+AnimalWaste.VERSION  = "1.0.0.0"
 
 -- Current scale factor. Updated by the Settings click callback and by
 -- loadFromXML. Defaults to 1x (pass-through) until either fires.
@@ -112,10 +112,10 @@ end
 -- the real globalProductionFactor falls off the end into an ignored vararg and
 -- arrives down-chain as nil. Manure/slurry survive (they multiply by
 -- foodFactor, which still lands correctly); milk is the only spec that
--- multiplies by globalProductionFactor, so milk silently crashed on
--- "mul on number and nil" at PlaceableHusbandryMilk.updateOutput. In the
--- earlier build that crash was hidden inside a pcall, which swallowed it every
--- tick and silently ZEROED milk on cow sheds while manure kept flowing.
+-- multiplies by globalProductionFactor, so milk crashes on
+-- "mul on number and nil" at PlaceableHusbandryMilk.updateOutput. That one
+-- defect caused every milk failure this mod has had -- silent while the bad
+-- call was hidden in a pcall, then a per-frame crash once it was not.
 --
 -- So we stay entirely out of the production chain. We append to the husbandry's
 -- onHourChanged event (a plain event listener: appendedFunction runs after the
@@ -355,6 +355,49 @@ function AnimalWaste.onSettingChanged(_, state, button)
 
     setting.state = state
     if setting.callback then setting.callback(name, setting.values[state]) end
+
+    -- Multiplayer: if we're the host, push the change out to all clients so
+    -- their menus track ours. Only the host changes the setting (client lock is
+    -- a later task); the host gate makes this a no-op in SP and on clients.
+    if name == "husbandryProductionRate" and AnimalWaste.isMultiplayerHost() then
+        AnimalWasteSettingsEvent.broadcast(state)
+    end
+end
+
+
+-- ---------------------------------------------------------------------
+-- Multiplayer value sync (server <-> client). Simulation stays server-side;
+-- this only keeps the client's displayed value in step with the host.
+-- ---------------------------------------------------------------------
+
+-- True only on the hosting server of a multiplayer session. False in
+-- single-player and on clients -- gates all outbound event traffic.
+function AnimalWaste.isMultiplayerHost()
+    return g_currentMission ~= nil
+        and g_currentMission.missionDynamicInfo ~= nil
+        and g_currentMission.missionDynamicInfo.isMultiplayer
+        and g_currentMission.getIsServer ~= nil
+        and g_currentMission:getIsServer()
+end
+
+
+-- Client-side: apply a state pushed from the server and refresh the menu row
+-- if it has been built. Does not re-broadcast (clients never send), and
+-- setState without forceEvent does not re-fire onSettingChanged -- so there is
+-- no echo loop back to the host.
+function AnimalWaste:applySyncedState(state)
+    local setting = AnimalWaste.SETTINGS.husbandryProductionRate
+    if setting == nil then return end
+    if state == nil or state < 1 or state > #setting.values then return end
+
+    setting.state = state
+    AnimalWaste.multiplier = setting.values[state]
+
+    if setting.element ~= nil then
+        setting.element:setState(state)
+    end
+
+    log("multiplier synced to %sx (state %s)", tostring(AnimalWaste.multiplier), tostring(state))
 end
 
 
@@ -386,6 +429,23 @@ if FSBaseMission ~= nil and FSBaseMission.saveSavegame ~= nil then
     FSBaseMission.saveSavegame = Utils.appendedFunction(
         FSBaseMission.saveSavegame,
         function(self) AnimalWaste:saveToXML() end)
+end
+
+-- Multiplayer join sync: when a client finishes loading on the server, push the
+-- current setting to just that client so its menu opens on the right number.
+-- onConnectionFinishedLoading is the server-side per-client "ready" hook.
+if FSBaseMission ~= nil and FSBaseMission.onConnectionFinishedLoading ~= nil then
+    FSBaseMission.onConnectionFinishedLoading = Utils.appendedFunction(
+        FSBaseMission.onConnectionFinishedLoading,
+        function(mission, connection)
+            if not AnimalWaste.isMultiplayerHost() then return end
+            local setting = AnimalWaste.SETTINGS.husbandryProductionRate
+            local state = (setting and (setting.state or setting.default)) or 1
+            AnimalWasteSettingsEvent.sendToClient(connection, state)
+        end)
+else
+    Logging.error("[%s] FSBaseMission.onConnectionFinishedLoading missing; MP join-sync disabled",
+                  AnimalWaste.MOD_NAME)
 end
 
 addModEventListener(AnimalWaste)

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="no" ?>
 <modDesc descVersion="108">
     <author>Chris Mason (Hartwell Farm)</author>
-    <version>0.1.0.2</version>
+    <version>1.0.0.0</version>
     <title>
         <en>Animal Waste Production Rate</en>
     </title>
@@ -18,13 +18,16 @@ is saved per-savegame and applies on the next in-game hour.
 Plays nicely with Realistic Livestock - the two mods touch
 different parts of the husbandry pipeline and don't conflict.
 
-v0.1 - cows only. Singleplayer only.
+Cows only. Works in singleplayer and in multiplayer
+(host-authoritative - the host applies the rate and syncs it
+to every client).
         ]]></en>
     </description>
 
-    <multiplayer supported="false"/>
+    <multiplayer supported="true"/>
 
     <extraSourceFiles>
+        <sourceFile filename="scripts/AnimalWasteSettingsEvent.lua"/>
         <sourceFile filename="scripts/AnimalWaste.lua"/>
     </extraSourceFiles>
 
