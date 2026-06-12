@@ -7,5 +7,7 @@
         <text name="aw_settings_husbandryProductionRate_texts_1"  text="1x"/>
         <text name="aw_settings_husbandryProductionRate_texts_2"  text="2x"/>
         <text name="aw_settings_husbandryProductionRate_texts_3"  text="3x"/>
+        <text name="aw_settings_husbandryProductionRate_texts_4"  text="5x"/>
+        <text name="aw_settings_husbandryProductionRate_texts_5"  text="10x"/>
     </texts>
 </l10n>

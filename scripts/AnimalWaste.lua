@@ -1,13 +1,13 @@
 -- Animal Waste Production Rate
 --
 -- Scales straw consumption and manure / liquid manure output on cow
--- sheds by a single multiplier (1x / 2x / 3x). The choice comes from
+-- sheds by a single multiplier (1x / 2x / 3x / 5x / 10x). The choice comes from
 -- a row injected into the vanilla General Settings page and persists
 -- per-savegame. Compatible with Realistic Livestock.
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
-AnimalWaste.VERSION  = "1.0.0.0"
+AnimalWaste.VERSION  = "1.1.0.0"
 
 -- Current scale factor. Updated by the Settings click callback and by
 -- loadFromXML. Defaults to 1x (pass-through) until either fires.
@@ -24,7 +24,7 @@ AnimalWaste.SETTINGS = {
         index    = 1,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 2, 3 },
+        values   = { 1, 2, 3, 5, 10 },
         callback = function(name, newValue)
             AnimalWaste.multiplier = newValue
             log("multiplier set to %sx", tostring(newValue))

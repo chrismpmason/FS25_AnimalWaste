@@ -20,7 +20,7 @@ local function logMP(fmt, ...)
     print(("[AnimalWaste MP] " .. fmt):format(...))
 end
 
--- For logging only: turn a state index into its multiplier (1x / 2x / 3x).
+-- For logging only: turn a state index into its multiplier (1x / 2x / 3x / 5x / 10x).
 local function stateToMultiplier(state)
     local setting = AnimalWaste ~= nil and AnimalWaste.SETTINGS ~= nil
         and AnimalWaste.SETTINGS.husbandryProductionRate
@@ -45,7 +45,7 @@ end
 
 
 function AnimalWasteSettingsEvent:writeStream(streamId, connection)
-    -- Only three states today; a UInt8 is plenty and keeps the packet tiny.
+    -- Five states today (1/2/3/5/10x); a UInt8 is plenty and keeps the packet tiny.
     streamWriteUInt8(streamId, self.state)
 end
 
