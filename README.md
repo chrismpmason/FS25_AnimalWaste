@@ -2,7 +2,7 @@
 
 A small Farming Simulator 25 mod that lets you scale up cow-shed manure and liquid manure production. Pick 1x, 2x, 3x, 5x or 10x.
 
-> **Stable release — v1.1.0.0.** Works in **singleplayer** and in **multiplayer** (host-authoritative sync, tested across two machines). Found something odd? Please file it via [GitHub Issues](https://github.com/chrismpmason/FS25_AnimalWaste/issues) — small details welcome (game version, other mods active, what you did, what you saw).
+> **Stable release — v1.1.0.1.** Works in **singleplayer** and in **multiplayer** (host-authoritative sync, tested across two machines). Found something odd? Please file it via [GitHub Issues](https://github.com/chrismpmason/FS25_AnimalWaste/issues) — small details welcome (game version, other mods active, what you did, what you saw).
 
 ## What it does
 
@@ -25,7 +25,7 @@ Once in-game, hit `Esc` → **Settings** and scroll down. You'll find a new sect
 
 ## Multiplayer
 
-Fully supported and host-authoritative. The host owns the production rate: when the host changes **Husbandry Production Rate**, the new value is synced to every connected client so the whole session stays in agreement, and it's persisted in the savegame. Clients see the current rate in their Settings page. Verified across two machines.
+Fully supported and host-authoritative. The host owns the production rate: when the host changes **Husbandry Production Rate**, the new value is synced to every connected client so the whole session stays in agreement, and it's persisted in the savegame. Clients see the current rate in their Settings page as a read-only row (only the host can change it). Verified across two machines.
 
 ## Compatibility
 
@@ -48,7 +48,7 @@ Fully supported and host-authoritative. The host owns the production rate: when 
 [GitHub Issues](https://github.com/chrismpmason/FS25_AnimalWaste/issues). Please include:
 
 - FS25 version
-- Mod version (currently 1.1.0.0)
+- Mod version (currently 1.1.0.1)
 - Whether you're in singleplayer or multiplayer (and if MP, host or client)
 - Other mods you have active (especially anything husbandry-related)
 - The relevant lines from `log.txt` (filter for `[FS25_AnimalWaste]`)
