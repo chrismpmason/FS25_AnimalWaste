@@ -7,7 +7,7 @@
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
-AnimalWaste.VERSION  = "1.1.0.0"
+AnimalWaste.VERSION  = "1.1.0.1"
 
 -- Current scale factor. Updated by the Settings click callback and by
 -- loadFromXML. Defaults to 1x (pass-through) until either fires.
@@ -311,6 +311,9 @@ function AnimalWaste.initSettings()
 
     sectionHeader:setText(g_i18n:getText("aw_settings"))
 
+    -- Editable on single-player and on the MP host; read-only on an MP client.
+    local canEdit = AnimalWaste.isSettingEditable()
+
     for name, setting in pairs(AnimalWaste.SETTINGS) do
         setting.state = setting.state or setting.default
         local row = multiOptionElement:clone(scrollPanel)
@@ -337,10 +340,22 @@ function AnimalWaste.initSettings()
                 setting.element = element
             end
         end
+
+        -- The vanilla game-settings row we cloned is host-authoritative: the base
+        -- game hides/disables it for non-master clients, and the clone inherits
+        -- that state -- which is why a client saw the section title but no control.
+        -- Override it explicitly so the control is ALWAYS visible, and editable
+        -- only where a change is safe (single-player or the MP host). On a client
+        -- it stays visible but disabled (read-only), showing the synced value.
+        row:setVisible(true)
+        if setting.element ~= nil then
+            setting.element:setVisible(true)
+            setting.element:setDisabled(not canEdit)
+        end
     end
 
     AnimalWaste.settingsInjected = true
-    log("settings UI injected")
+    log("settings injected (host=%s)", tostring(canEdit))
 end
 
 
@@ -378,6 +393,18 @@ function AnimalWaste.isMultiplayerHost()
         and g_currentMission.missionDynamicInfo.isMultiplayer
         and g_currentMission.getIsServer ~= nil
         and g_currentMission:getIsServer()
+end
+
+
+-- True where it is safe to CHANGE the setting: single-player, or the MP host.
+-- False on an MP client -- the setting is host-authoritative, so a client edit
+-- would not broadcast and would desync the session. The client still SEES the
+-- control (read-only); only its interactivity is gated here.
+function AnimalWaste.isSettingEditable()
+    if g_currentMission == nil then return true end
+    local dyn = g_currentMission.missionDynamicInfo
+    if dyn == nil or not dyn.isMultiplayer then return true end  -- single-player
+    return g_currentMission.getIsServer ~= nil and g_currentMission:getIsServer()
 end
 
 
