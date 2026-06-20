@@ -9,5 +9,12 @@
         <text name="aw_settings_husbandryProductionRate_texts_3"  text="3x"/>
         <text name="aw_settings_husbandryProductionRate_texts_4"  text="5x"/>
         <text name="aw_settings_husbandryProductionRate_texts_5"  text="10x"/>
+
+        <text name="aw_settings_deepLitter_label"                 text="Deep Litter"/>
+        <text name="aw_settings_deepLitter_tooltip"               text="Muck and bedding build up in the shed over time instead of clearing continuously — muck out every few months."/>
+        <text name="aw_settings_deepLitter_texts_1"               text="Off"/>
+        <text name="aw_settings_deepLitter_texts_2"               text="On"/>
+
+        <text name="aw_muckout_button"                            text="Muck out shed"/>
     </texts>
 </l10n>
