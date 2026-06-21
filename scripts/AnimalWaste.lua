@@ -141,6 +141,18 @@ local function forEachCowHusbandry(fn)
     end
 end
 
+-- Run fn(placeable) for every ANIMAL husbandry (any species), so diagnostics can
+-- report a shed even when our cow-detection is what's failing.
+local function forEachAnimalHusbandry(fn)
+    local ps = g_currentMission and g_currentMission.placeableSystem
+    if ps == nil or ps.placeables == nil then return end
+    for _, placeable in ipairs(ps.placeables) do
+        if placeable.spec_husbandryAnimals ~= nil then
+            fn(placeable)
+        end
+    end
+end
+
 
 -- ---------------------------------------------------------------------
 -- Deep Litter pack store
@@ -187,9 +199,10 @@ end
 -- onHourChanged append while Deep Litter is ON, after the hour's production has
 -- landed -- so it sweeps up both the vanilla 1x and the multiplier's extra,
 -- with no double counting (the store is left at zero for manure).
+-- Returns the litres of manure removed from the store and moved into the pack.
 function AnimalWaste.divertManureToPack(placeable)
     local strawSpec = placeable.spec_husbandryStraw
-    if strawSpec == nil or strawSpec.outputFillType == nil then return end
+    if strawSpec == nil or strawSpec.outputFillType == nil then return 0 end
 
     -- removeHusbandryFillLevel returns the portion it could NOT remove, so a
     -- request far larger than any shed can hold makes (request - returned) equal
@@ -198,12 +211,13 @@ function AnimalWaste.divertManureToPack(placeable)
     local farmId  = placeable:getOwnerFarmId()
     local REQUEST = 1e9
     local notRemoved = placeable:removeHusbandryFillLevel(farmId, REQUEST, strawSpec.outputFillType)
-    if notRemoved == nil then return end
+    if notRemoved == nil then return 0 end
 
     local removed = REQUEST - notRemoved
     if removed > 0 then
         AnimalWaste.addToPack(placeable, removed)
     end
+    return removed
 end
 
 
@@ -239,6 +253,50 @@ end
 -- client never simulates the pack.
 function AnimalWaste.applyPackSync(placeable, liters)
     setPackDepth(placeable, liters)
+end
+
+
+-- Diagnostic only: human-readable fill-type name for a fill-type index.
+local function fillTypeName(fillType)
+    if g_fillTypeManager == nil or fillType == nil then return "?" end
+    if g_fillTypeManager.getFillTypeNameByIndex ~= nil then
+        local ok, name = pcall(function() return g_fillTypeManager:getFillTypeNameByIndex(fillType) end)
+        if ok and name ~= nil then return name end
+    end
+    return "?"
+end
+
+-- Diagnostic only: independently READ the husbandry's manure level (without
+-- removing it), to cross-check against what the player sees as loadable manure.
+-- Probes likely getters and reports which one (if any) answered. pcall-guarded
+-- so an absent / differently-shaped method can never crash the test command.
+local function readManureLevel(placeable, fillType)
+    if fillType == nil then return nil, "no-filltype" end
+    local candidates = { "getHusbandryFillLevel", "getFillLevel" }
+    for _, methodName in ipairs(candidates) do
+        if placeable[methodName] ~= nil then
+            local ok, val = pcall(function() return placeable[methodName](placeable, fillType) end)
+            if ok and type(val) == "number" then return val, methodName end
+        end
+    end
+    return nil, "none"
+end
+
+
+-- Per-hour Deep Litter capture for one cow shed. Invoked UNCONDITIONALLY from
+-- the (proven-firing) onHourChanged append, so the entry log below proves both
+-- that this is reached every hour AND what the toggle reads at simulation time.
+-- The ON/OFF gate lives inside, AFTER the log -- nothing above it can hide a
+-- run. Caller has already confirmed server + cow husbandry.
+function AnimalWaste.deepLitterCaptureTick(self, currentHour)
+    -- VERY FIRST statement: before any condition, before any fill-level call.
+    log("DL capture tick fired (husbandry=%s, DL=%s)",
+        tostring(self.uniqueId or self),
+        AnimalWaste.deepLitterEnabled and "on" or "off")
+
+    if not AnimalWaste.deepLitterEnabled then return end
+
+    AnimalWaste.divertManureToPack(self)
 end
 
 
@@ -311,6 +369,13 @@ local function onHourChangedAddExtraWaste(self, currentHour)
     if not self.isServer then return end
     if not isCowHusbandry(self) then return end
 
+    -- DIAGNOSTIC (Task 3): prove whether this vanilla-onHourChanged append runs
+    -- at all during play. Realistic Livestock ALSO appends to onHourChanged and
+    -- does its real production there; load order decides whether this runs before
+    -- or after RL. This line confirms the function is reached for a cow shed.
+    log("onHourChanged append reached (husbandry=%s, M=%s)",
+        tostring(self.uniqueId or self), tostring(AnimalWaste.multiplier or 1))
+
     local husbandrySpec = self.spec_husbandry
     if husbandrySpec == nil then return end
 
@@ -328,14 +393,21 @@ local function onHourChangedAddExtraWaste(self, currentHour)
         addExtraLiquidManure(self, M, foodFactor, timeAdjustment)
     end
 
-    -- Deep Litter path: while ON, divert the shed's solid manure (the vanilla 1x
-    -- plus any multiplier extra just added above) into the per-shed pack instead
-    -- of leaving it as loadable manure. Slurry is untouched and flows normally.
-    -- Independent of M, so the pack accumulates at 1x too. No-op when OFF, which
-    -- is the default -- so OFF behaviour is identical to the live mod.
-    if AnimalWaste.deepLitterEnabled then
-        AnimalWaste.divertManureToPack(self)
-    end
+    -- Deep Litter capture has MOVED out of this append. Under Realistic Livestock
+    -- this function runs BEFORE RL produces the hour's manure (RL appends to
+    -- onHourChanged after us, so it runs after us), so sweeping here caught an
+    -- empty store -- the exact bug. The capture now rides a SEPARATE append
+    -- installed in loadMap (see installPostProductionCapture), which is therefore
+    -- LAST in the chain and runs AFTER RL has filled the store.
+end
+
+
+-- Capture tick gated for the post-production append below. Mirrors exactly what
+-- awDLTest does on demand, but for one shed per in-game hour.
+local function onHourChangedDeepLitterCapture(self, currentHour)
+    if not self.isServer then return end
+    if not isCowHusbandry(self) then return end
+    AnimalWaste.deepLitterCaptureTick(self, currentHour)
 end
 
 
@@ -357,6 +429,29 @@ function AnimalWaste:installHooks()
 end
 
 
+-- Install the Deep Litter capture as a SEPARATE onHourChanged append, done from
+-- loadMap rather than at mod-load. Every mod's source (incl. Realistic Livestock)
+-- has finished appending to onHourChanged before any loadMap runs, so appending
+-- here puts our capture LAST in the chain -- it runs after the vanilla cycle AND
+-- after RL's production, when the hour's manure is actually in the store. Guarded
+-- so re-entering loadMap (loading another save in the same session) can't stack
+-- duplicate appends.
+function AnimalWaste:installPostProductionCapture()
+    if AnimalWaste.captureHookInstalled then return end
+    if PlaceableHusbandry == nil or PlaceableHusbandry.onHourChanged == nil then
+        Logging.error("[%s] PlaceableHusbandry.onHourChanged missing; deep-litter capture not installed",
+                      AnimalWaste.MOD_NAME)
+        return
+    end
+
+    PlaceableHusbandry.onHourChanged = Utils.appendedFunction(
+        PlaceableHusbandry.onHourChanged, onHourChangedDeepLitterCapture)
+
+    AnimalWaste.captureHookInstalled = true
+    log("deep-litter capture re-anchored: appended to onHourChanged at loadMap (runs LAST, after RL production)")
+end
+
+
 -- ---------------------------------------------------------------------
 -- Lifecycle
 -- ---------------------------------------------------------------------
@@ -365,10 +460,17 @@ function AnimalWaste:loadMap(filename)
     self:detectRealisticLivestock()
     self:loadFromXML()
 
+    -- Re-anchor the hourly capture so it runs AFTER Realistic Livestock's hourly
+    -- production (see installPostProductionCapture). Must happen here, not at
+    -- mod-load, to land last in the onHourChanged chain.
+    self:installPostProductionCapture()
+
     -- Guaranteed muck-out trigger for testing, independent of the menu button.
     if addConsoleCommand ~= nil then
         addConsoleCommand("awMuckOut", "Deep Litter: muck out all owned cow sheds",
             "consoleMuckOut", AnimalWaste)
+        addConsoleCommand("awDLTest", "Deep Litter: run the capture once per shed now and print diagnostics",
+            "consoleDLTest", AnimalWaste)
     end
 
     log("v%s loaded, multiplier=%sx, deep litter %s", AnimalWaste.VERSION,
@@ -663,13 +765,19 @@ end
 
 
 -- The husbandry currently shown in the animals menu, if we can determine it and
--- it is a cow shed. Returns nil otherwise (the caller falls back to all sheds).
+-- it is a cow shed. Prefers the husbandry handed to displayCluster (the frame's
+-- "now showing this shed" signal), then falls back to frame fields. Returns nil
+-- otherwise (the caller then falls back to all sheds).
 function AnimalWaste.getSelectedHusbandry()
+    local h = AnimalWaste._selectedHusbandry
+    if h ~= nil and isCowHusbandry(h) then return h end
+
     local frame = AnimalWaste._animalsFrame
-    if frame == nil then return nil end
-    local candidate = frame.husbandry or frame.currentHusbandry or frame.selectedHusbandry
-    if candidate ~= nil and isCowHusbandry(candidate) then
-        return candidate
+    if frame ~= nil then
+        local candidate = frame.husbandry or frame.currentHusbandry or frame.selectedHusbandry
+        if candidate ~= nil and isCowHusbandry(candidate) then
+            return candidate
+        end
     end
     return nil
 end
@@ -690,32 +798,36 @@ function AnimalWaste.onMuckOutButton()
 end
 
 
--- Add the "Muck out shed" button to the animals menu. Written defensively: if
--- the frame's button API is not shaped as expected on this game build it logs
--- and bows out rather than risking a menu crash. Reuse the console command
--- (awMuckOut) as a guaranteed alternative trigger.
-function AnimalWaste.installAnimalsMenuButton(frame)
-    if frame == nil then return end
-    if frame.menuButtonInfo == nil or frame.setMenuButtonInfoDirty == nil then
-        return  -- unexpected frame shape; console command still works
+-- Return a button-info list = the frame's own buttons plus our "Muck out shed"
+-- button appended. Used to OVERRIDE InGameMenuAnimalsFrame:getMenuButtonInfo so
+-- our button is re-included every single time the menu rebuilds its bottom bar.
+-- That is the fix for the button vanishing: the previous approach pushed the
+-- button into the frame's menuButtonInfo on frame-open only, but the animals
+-- frame rebuilds that list every time the displayed husbandry changes (each
+-- displayCluster), so the one-time button was dropped as the player cycled
+-- sheds. Building a fresh list on every getMenuButtonInfo call survives all
+-- rebuilds. A fresh copy (never mutating the frame's list) means no duplicates.
+function AnimalWaste.withMuckOutButton(frame, info)
+    local result = {}
+    if info ~= nil then
+        for _, b in ipairs(info) do
+            if b.awMuckOut then return info end  -- already ours; leave untouched
+            result[#result + 1] = b
+        end
     end
-    if InputAction == nil or InputAction.MENU_EXTRA_2 == nil then return end
 
-    -- Skip if our button is already in the current list. Tagging and scanning
-    -- (rather than a per-frame flag) stays correct whether the frame rebuilds its
-    -- button list on each open or keeps it -- no duplicates, never disappears.
-    for _, info in ipairs(frame.menuButtonInfo) do
-        if info.awMuckOut then return end
+    if InputAction == nil or InputAction.MENU_EXTRA_2 == nil then
+        return info  -- no usable input action; don't add (console command still works)
     end
 
-    table.insert(frame.menuButtonInfo, {
+    result[#result + 1] = {
         awMuckOut   = true,
         profile     = "buttonActivate",
         inputAction = InputAction.MENU_EXTRA_2,
         text        = g_i18n:getText("aw_muckout_button"),
         callback    = function() AnimalWaste.onMuckOutButton() end,
-    })
-    frame:setMenuButtonInfoDirty()
+    }
+    return result
 end
 
 
@@ -735,6 +847,48 @@ function AnimalWaste:consoleMuckOut()
     end)
     return string.format("AnimalWaste: mucked out %d cow shed(s), released %.0f L of manure.",
         sheds, released)
+end
+
+
+-- Console command: on-demand capture test. Does NOT wait for an hour change.
+-- Walks EVERY animal husbandry and, for each, prints one diagnostic line with:
+-- shed id, cow-detected?, the Deep Litter flag as read right now, the manure
+-- fill type, an independent read-back of the loadable manure level, the litres
+-- the capture actually diverted, and the pack value before and after. Server-only
+-- (it mutates fill levels). The divert runs regardless of the toggle so the test
+-- never depends on the flag or on time passing.
+function AnimalWaste:consoleDLTest()
+    if not AnimalWaste.isServerSide() then
+        return "AnimalWaste: awDLTest must run on the host/server."
+    end
+
+    local count = 0
+    forEachAnimalHusbandry(function(placeable)
+        count = count + 1
+
+        local id        = tostring(placeable.uniqueId or placeable)
+        local cow       = isCowHusbandry(placeable)
+        local dl        = AnimalWaste.deepLitterEnabled
+        local strawSpec = placeable.spec_husbandryStraw
+        local fillType  = strawSpec and strawSpec.outputFillType
+        local readLevel, readVia = readManureLevel(placeable, fillType)
+
+        local packBefore = getPackDepth(placeable)
+        -- Run the capture logic once, for real, on cow sheds only.
+        local diverted = cow and AnimalWaste.divertManureToPack(placeable) or 0
+        local packAfter = getPackDepth(placeable)
+
+        log("awDLTest shed=%s cow=%s DL=%s manureFT=%s(%s) loadableRead=%s(via %s) diverted=%.1f pack: %.1f -> %.1f",
+            id, tostring(cow), tostring(dl),
+            tostring(fillType), fillTypeName(fillType),
+            tostring(readLevel), tostring(readVia),
+            diverted, packBefore, packAfter)
+    end)
+
+    if count == 0 then
+        return "AnimalWaste: awDLTest found no animal husbandries."
+    end
+    return string.format("AnimalWaste: awDLTest ran on %d animal shed(s) -- see the log lines above.", count)
 end
 
 
@@ -761,19 +915,47 @@ if InGameMenuSettingsFrame ~= nil then
     end
 end
 
--- Animals menu: add the "Muck out shed" button each time the frame opens.
--- appendedFunction runs after the frame has built its own buttons, so we just
--- append ours. Guarded inside installAnimalsMenuButton against API differences.
-if InGameMenuAnimalsFrame ~= nil and InGameMenuAnimalsFrame.onFrameOpen ~= nil then
-    InGameMenuAnimalsFrame.onFrameOpen = Utils.appendedFunction(
-        InGameMenuAnimalsFrame.onFrameOpen,
-        function(self)
-            AnimalWaste._animalsFrame = self
-            AnimalWaste.installAnimalsMenuButton(self)
-        end)
-else
-    Logging.warning("[%s] InGameMenuAnimalsFrame.onFrameOpen missing; muck-out menu button unavailable (use the awMuckOut console command)",
-                    AnimalWaste.MOD_NAME)
+-- Animals menu "Muck out shed" button.
+--
+-- The bottom-bar buttons are built by InGameMenuAnimalsFrame:getMenuButtonInfo,
+-- which the menu re-queries every time it refreshes the bar -- including when the
+-- displayed husbandry changes. Overriding it (rather than pushing into the
+-- frame's button list once on open) makes our button re-appear on every refresh,
+-- so it no longer vanishes as the player cycles between cow sheds.
+if InGameMenuAnimalsFrame ~= nil then
+    local baseGetMenuButtonInfo = InGameMenuAnimalsFrame.getMenuButtonInfo
+    if baseGetMenuButtonInfo ~= nil then
+        InGameMenuAnimalsFrame.getMenuButtonInfo = function(self, ...)
+            local info = baseGetMenuButtonInfo(self, ...)
+            return AnimalWaste.withMuckOutButton(self, info)
+        end
+    else
+        Logging.warning("[%s] InGameMenuAnimalsFrame.getMenuButtonInfo missing; muck-out menu button unavailable (use the awMuckOut console command)",
+                        AnimalWaste.MOD_NAME)
+    end
+
+    -- Record the frame and force a bar refresh on open.
+    if InGameMenuAnimalsFrame.onFrameOpen ~= nil then
+        InGameMenuAnimalsFrame.onFrameOpen = Utils.appendedFunction(
+            InGameMenuAnimalsFrame.onFrameOpen,
+            function(self)
+                AnimalWaste._animalsFrame = self
+                if self.setMenuButtonInfoDirty ~= nil then self:setMenuButtonInfoDirty() end
+            end)
+    end
+
+    -- displayCluster is the "now showing this husbandry" signal. Record which
+    -- shed is selected (for muck-out targeting) and refresh the bar so the
+    -- override re-adds our button for the newly selected shed.
+    if InGameMenuAnimalsFrame.displayCluster ~= nil then
+        InGameMenuAnimalsFrame.displayCluster = Utils.appendedFunction(
+            InGameMenuAnimalsFrame.displayCluster,
+            function(self, animal, husbandry)
+                AnimalWaste._animalsFrame = self
+                if husbandry ~= nil then AnimalWaste._selectedHusbandry = husbandry end
+                if self.setMenuButtonInfoDirty ~= nil then self:setMenuButtonInfoDirty() end
+            end)
+    end
 end
 
 -- Belt-and-braces save on game-save (catches quit paths that skip onFrameClose).
