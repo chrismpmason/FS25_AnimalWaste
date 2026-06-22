@@ -23,10 +23,24 @@ AnimalWaste.deepLitterEnabled = false
 -- (see getPackDepth). Empty on a fresh save.
 AnimalWaste.pendingPacks = {}
 
+-- Per-hour diagnostic logging. OFF by default so normal play stays quiet (the
+-- hourly capture/append traces fire once per shed per in-game hour). Flip to
+-- true only when chasing a timing/capture issue. One-off logs (hooks installed,
+-- settings saved/loaded, deep litter ON/OFF, muck-out released) ignore this and
+-- always print.
+AnimalWaste.DEBUG = false
+
 -- Must be declared before SETTINGS (FS25 has a global `log` with
 -- different semantics that the callback closure would otherwise bind to).
 local function log(fmt, ...)
     print(("[%s] " .. fmt):format(AnimalWaste.MOD_NAME, ...))
+end
+
+-- Gated logger for the noisy per-hour traces. No-op unless AnimalWaste.DEBUG.
+local function debugLog(fmt, ...)
+    if AnimalWaste.DEBUG then
+        log("DEBUG " .. fmt, ...)
+    end
 end
 
 AnimalWaste.SETTINGS = {
@@ -151,6 +165,78 @@ local function forEachAnimalHusbandry(fn)
             fn(placeable)
         end
     end
+end
+
+
+-- ---------------------------------------------------------------------
+-- Nearest-shed targeting (used by the awAddManure test command)
+-- ---------------------------------------------------------------------
+
+-- The local player's world position, whether on foot or in a vehicle. Returns
+-- x, y, z or nil if it can't be read (caller then falls back to the first shed).
+-- pcall-guarded so an API difference can never crash the console command.
+local function getPlayerWorldPosition()
+    if g_localPlayer == nil then return nil end
+
+    -- In a vehicle: the player node tracks the seat, so use the vehicle root.
+    if g_localPlayer.getCurrentVehicle ~= nil then
+        local veh = g_localPlayer:getCurrentVehicle()
+        if veh ~= nil and veh.rootNode ~= nil then
+            local ok, x, y, z = pcall(getWorldTranslation, veh.rootNode)
+            if ok and x ~= nil then return x, y, z end
+        end
+    end
+
+    if g_localPlayer.getPosition ~= nil then
+        local ok, x, y, z = pcall(function() return g_localPlayer:getPosition() end)
+        if ok and x ~= nil then return x, y, z end
+    end
+    return nil
+end
+
+-- A placeable's world position via its root node. Returns x, y, z or nil.
+local function getPlaceableWorldPosition(placeable)
+    local node = placeable.rootNode
+    if node == nil and placeable.getRootNode ~= nil then
+        node = placeable:getRootNode()
+    end
+    if node == nil then return nil end
+    local ok, x, y, z = pcall(getWorldTranslation, node)
+    if ok and x ~= nil then return x, y, z end
+    return nil
+end
+
+-- The cow husbandry nearest the player (2D distance, height ignored). Returns
+-- nil if the player position is unreadable or no cow shed has a usable position,
+-- so the caller can fall back to the first cow shed.
+local function findNearestCowHusbandry()
+    local px, _, pz = getPlayerWorldPosition()
+    if px == nil then return nil end
+
+    local best, bestDist
+    forEachAnimalHusbandry(function(placeable)
+        if not isCowHusbandry(placeable) then return end
+        local hx, _, hz = getPlaceableWorldPosition(placeable)
+        if hx == nil then return end
+        local dx, dz = hx - px, hz - pz
+        local dist = dx * dx + dz * dz  -- squared distance is fine for comparison
+        if bestDist == nil or dist < bestDist then
+            bestDist, best = dist, placeable
+        end
+    end)
+    return best
+end
+
+-- The first cow husbandry in placeable order. Fallback when nearest-targeting
+-- can't read a position.
+local function firstCowHusbandry()
+    local first
+    forEachAnimalHusbandry(function(placeable)
+        if first == nil and isCowHusbandry(placeable) then
+            first = placeable
+        end
+    end)
+    return first
 end
 
 
@@ -289,8 +375,9 @@ end
 -- The ON/OFF gate lives inside, AFTER the log -- nothing above it can hide a
 -- run. Caller has already confirmed server + cow husbandry.
 function AnimalWaste.deepLitterCaptureTick(self, currentHour)
-    -- VERY FIRST statement: before any condition, before any fill-level call.
-    log("DL capture tick fired (husbandry=%s, DL=%s)",
+    -- Per-hour trace (debug-gated): proves this is reached every hour and what
+    -- the toggle reads at simulation time.
+    debugLog("DL capture tick fired (husbandry=%s, DL=%s)",
         tostring(self.uniqueId or self),
         AnimalWaste.deepLitterEnabled and "on" or "off")
 
@@ -369,11 +456,10 @@ local function onHourChangedAddExtraWaste(self, currentHour)
     if not self.isServer then return end
     if not isCowHusbandry(self) then return end
 
-    -- DIAGNOSTIC (Task 3): prove whether this vanilla-onHourChanged append runs
-    -- at all during play. Realistic Livestock ALSO appends to onHourChanged and
-    -- does its real production there; load order decides whether this runs before
-    -- or after RL. This line confirms the function is reached for a cow shed.
-    log("onHourChanged append reached (husbandry=%s, M=%s)",
+    -- Per-hour trace (debug-gated): confirms this vanilla-onHourChanged append
+    -- runs for a cow shed. Realistic Livestock also appends to onHourChanged;
+    -- load order decides whether this runs before or after RL's production.
+    debugLog("onHourChanged append reached (husbandry=%s, M=%s)",
         tostring(self.uniqueId or self), tostring(AnimalWaste.multiplier or 1))
 
     local husbandrySpec = self.spec_husbandry
@@ -471,6 +557,8 @@ function AnimalWaste:loadMap(filename)
             "consoleMuckOut", AnimalWaste)
         addConsoleCommand("awDLTest", "Deep Litter: run the capture once per shed now and print diagnostics",
             "consoleDLTest", AnimalWaste)
+        addConsoleCommand("awAddManure", "Deep Litter test: add [litres] manure (default 20000) to the nearest cow shed",
+            "consoleAddManure", AnimalWaste)
     end
 
     log("v%s loaded, multiplier=%sx, deep litter %s", AnimalWaste.VERSION,
@@ -889,6 +977,78 @@ function AnimalWaste:consoleDLTest()
         return "AnimalWaste: awDLTest found no animal husbandries."
     end
     return string.format("AnimalWaste: awDLTest ran on %d animal shed(s) -- see the log lines above.", count)
+end
+
+
+-- Console command: awAddManure [litres]
+-- Seeds loadable MANURE into a cow shed's manure store so the muck-out -> heap
+-- flow can be tested on a fresh save. Defaults to 20000 L. Targets the cow shed
+-- NEAREST the player; if the player position can't be read it falls back to the
+-- first cow shed (and the printed shed id tells you which one got it). The add
+-- is clamped to the store's free capacity so it never overfills. Server-only
+-- (it mutates fill levels), and uses the same addHusbandryFillLevelFromTool API
+-- the muck-out release relies on.
+function AnimalWaste:consoleAddManure(litresArg)
+    if not AnimalWaste.isServerSide() then
+        return "AnimalWaste: awAddManure must run on the host/server."
+    end
+
+    local litres = tonumber(litresArg) or 20000
+    if litres <= 0 then
+        return string.format("AnimalWaste: awAddManure amount must be > 0 (got '%s').", tostring(litresArg))
+    end
+
+    -- Prefer the cow shed nearest the player; fall back to the first cow shed.
+    local target, how = findNearestCowHusbandry(), "nearest"
+    if target == nil then
+        target, how = firstCowHusbandry(), "first (nearest-targeting unavailable)"
+    end
+    if target == nil then
+        return "AnimalWaste: awAddManure found no cow husbandry to seed."
+    end
+
+    local strawSpec = target.spec_husbandryStraw
+    local fillType  = strawSpec and strawSpec.outputFillType
+    if fillType == nil then
+        return "AnimalWaste: awAddManure -- target cow shed has no manure output fill type."
+    end
+
+    local farmId = target:getOwnerFarmId()
+    local id     = tostring(target.uniqueId or target)
+
+    -- Capacity (for the print) and free capacity (to clamp the add).
+    local capacity, freeCap
+    if target.getHusbandryCapacity ~= nil then
+        local ok, c = pcall(function() return target:getHusbandryCapacity(fillType, farmId) end)
+        if ok then capacity = c end
+    end
+    if target.getHusbandryFreeCapacity ~= nil then
+        local ok, f = pcall(function() return target:getHusbandryFreeCapacity(fillType, farmId) end)
+        if ok then freeCap = f end
+    end
+
+    local before = select(1, readManureLevel(target, fillType)) or 0
+
+    -- Clamp to free space so we never exceed capacity. If free capacity is
+    -- unknown, derive it from capacity - before; if both are unknown, add as-is.
+    local room = freeCap
+    if room == nil and capacity ~= nil then room = math.max(0, capacity - before) end
+    local toAdd = room ~= nil and math.min(litres, room) or litres
+    if toAdd < 0 then toAdd = 0 end
+
+    if toAdd > 0 then
+        target:addHusbandryFillLevelFromTool(farmId, toAdd, fillType, nil, nil, nil)
+    end
+
+    local after  = select(1, readManureLevel(target, fillType)) or (before + toAdd)
+    local capStr = capacity ~= nil and string.format("%.0f", capacity) or "?"
+
+    -- One line: shed id, manure before -> after, capacity (plus what/where).
+    local line = string.format(
+        "AnimalWaste: awAddManure shed=%s manure %.0f -> %.0f, capacity %s (added %.0f of %.0f requested, %s shed).",
+        id, before, after, capStr, toAdd, litres, how)
+    log("%s", line)
+    return line
 end
 
 
