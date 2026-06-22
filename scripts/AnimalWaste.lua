@@ -7,7 +7,7 @@
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
-AnimalWaste.VERSION  = "1.1.0.1"
+AnimalWaste.VERSION  = "1.1.0.2"
 
 -- Current scale factor. Updated by the Settings click callback and by
 -- loadFromXML. Defaults to 1x (pass-through) until either fires.
@@ -359,6 +359,23 @@ function AnimalWaste.initSettings()
 end
 
 
+-- Re-evaluate editability every time the settings page opens, so a player whose
+-- admin status changed since the row was first built (e.g. logged in as admin on
+-- a dedicated server) gets the control enabled/disabled correctly. initSettings
+-- only runs once; this runs on every open. Cheap and regression-safe: in SP and
+-- on the host canEdit is always true, so nothing changes for them.
+function AnimalWaste.refreshSettingEditability()
+    if not AnimalWaste.settingsInjected then return end
+    local canEdit = AnimalWaste.isSettingEditable()
+    for _, setting in pairs(AnimalWaste.SETTINGS) do
+        if setting.element ~= nil then
+            setting.element:setVisible(true)
+            setting.element:setDisabled(not canEdit)
+        end
+    end
+end
+
+
 function AnimalWaste.onSettingChanged(_, state, button)
     if button == nil then button = state end
     if button == nil or button.id == nil then return end
@@ -368,15 +385,74 @@ function AnimalWaste.onSettingChanged(_, state, button)
     local setting = AnimalWaste.SETTINGS[name]
     if setting == nil then return end
 
+    -- Multiplayer client that is NOT the server (e.g. the admin on a dedicated
+    -- server): the simulation and the savegame live on the server, so we cannot
+    -- apply or persist here. Route the change as a request; the server verifies
+    -- our admin rights, then applies + persists + broadcasts the value back to
+    -- us (and everyone) as a sync. We do not touch the multiplier or broadcast
+    -- locally. SP and the listen-server host fall through to the original path
+    -- below, so their behaviour is unchanged.
+    if name == "husbandryProductionRate"
+            and not AnimalWaste.isServerSide()
+            and g_currentMission ~= nil
+            and g_currentMission.missionDynamicInfo ~= nil
+            and g_currentMission.missionDynamicInfo.isMultiplayer then
+        setting.state = state  -- optimistic; the server's sync will confirm/correct
+        AnimalWasteSettingsEvent.sendChangeRequest(state)
+        return
+    end
+
     setting.state = state
     if setting.callback then setting.callback(name, setting.values[state]) end
 
     -- Multiplayer: if we're the host, push the change out to all clients so
-    -- their menus track ours. Only the host changes the setting (client lock is
-    -- a later task); the host gate makes this a no-op in SP and on clients.
+    -- their menus track ours. The host gate makes this a no-op in SP.
     if name == "husbandryProductionRate" and AnimalWaste.isMultiplayerHost() then
         AnimalWasteSettingsEvent.broadcast(state)
     end
+end
+
+
+-- True wherever the simulation runs: single-player, or the server in MP (listen
+-- host or dedicated). The multiplier value and the savegame are server-side, so
+-- every authoritative apply is gated on this; a client routes its intent through
+-- AnimalWasteSettingsEvent instead.
+function AnimalWaste.isServerSide()
+    return g_currentMission ~= nil
+        and g_currentMission.getIsServer ~= nil
+        and g_currentMission:getIsServer()
+end
+
+
+-- Server-side: handle a multiplier change REQUEST from a client (sent by
+-- AnimalWasteSettingsEvent when an admin changes the control). The client is NOT
+-- trusted: we resolve the sending connection to its User and require master-user
+-- (admin) rights before applying. On accept we apply the value, persist it via
+-- the same animalWaste.xml save path, and broadcast the authoritative value to
+-- all clients. Non-admin requests are logged and dropped.
+function AnimalWaste.handleAdminChangeRequest(connection, state)
+    if not AnimalWaste.isServerSide() then return end
+
+    local userManager = g_currentMission ~= nil and g_currentMission.userManager
+    local user = userManager ~= nil and userManager:getUserByConnection(connection) or nil
+    if user == nil or not user:getIsMasterUser() then
+        Logging.warning("[%s] rejected multiplier change request from a non-admin client",
+                        AnimalWaste.MOD_NAME)
+        return
+    end
+
+    local setting = AnimalWaste.SETTINGS.husbandryProductionRate
+    if setting == nil then return end
+    if state == nil or state < 1 or state > #setting.values then return end
+
+    setting.state = state
+    if setting.callback then setting.callback("husbandryProductionRate", setting.values[state]) end
+
+    -- Persist on the server (its savegame is the authority) and sync everyone.
+    AnimalWaste:saveToXML()
+    AnimalWasteSettingsEvent.broadcast(state)
+    log("admin change accepted: multiplier set to %sx (state %d), persisted and broadcast",
+        tostring(setting.values[state]), state)
 end
 
 
@@ -396,15 +472,29 @@ function AnimalWaste.isMultiplayerHost()
 end
 
 
--- True where it is safe to CHANGE the setting: single-player, or the MP host.
--- False on an MP client -- the setting is host-authoritative, so a client edit
--- would not broadcast and would desync the session. The client still SEES the
--- control (read-only); only its interactivity is gated here.
+-- True where the LOCAL player may CHANGE the setting:
+--   * single-player                              -> always
+--   * the listen-server host (we are the server) -> always (applies locally)
+--   * a multiplayer ADMIN / master user          -> yes; the change is routed to
+--     the server, which re-verifies admin rights before applying. This is what
+--     unlocks the setting on a DEDICATED server, where no connected player is the
+--     server so the old getIsServer() gate left everyone read-only.
+-- Ordinary (non-admin) clients stay read-only: they SEE the control but it is
+-- disabled, showing the value synced from the server.
 function AnimalWaste.isSettingEditable()
     if g_currentMission == nil then return true end
     local dyn = g_currentMission.missionDynamicInfo
     if dyn == nil or not dyn.isMultiplayer then return true end  -- single-player
-    return g_currentMission.getIsServer ~= nil and g_currentMission:getIsServer()
+
+    -- Listen-server host / any context where we ARE the server.
+    if g_currentMission.getIsServer ~= nil and g_currentMission:getIsServer() then
+        return true
+    end
+
+    -- Multiplayer admin (master user). g_currentMission.isMasterUser is the
+    -- engine's local admin flag (same one the base game uses for admin-only
+    -- console commands).
+    return g_currentMission.isMasterUser == true
 end
 
 
@@ -438,7 +528,10 @@ if InGameMenuSettingsFrame ~= nil then
     if InGameMenuSettingsFrame.onFrameOpen ~= nil then
         InGameMenuSettingsFrame.onFrameOpen = Utils.appendedFunction(
             InGameMenuSettingsFrame.onFrameOpen,
-            function(self) AnimalWaste.initSettings() end)
+            function(self)
+                AnimalWaste.initSettings()
+                AnimalWaste.refreshSettingEditability()
+            end)
     else
         Logging.error("[%s] InGameMenuSettingsFrame.onFrameOpen missing; settings UI cannot install",
                       AnimalWaste.MOD_NAME)
