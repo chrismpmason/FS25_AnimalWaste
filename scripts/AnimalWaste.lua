@@ -13,10 +13,22 @@ AnimalWaste.VERSION  = "1.1.0.1"
 -- loadFromXML. Defaults to 1x (pass-through) until either fires.
 AnimalWaste.multiplier = 1
 
+-- Diagnostic logging. OFF for normal play; the only DEBUG-gated line is the
+-- per-shed hourly extra-waste trace, used when testing the RL-order fix. Flip to
+-- true to re-enable it.
+AnimalWaste.DEBUG = false
+
 -- Must be declared before SETTINGS (FS25 has a global `log` with
 -- different semantics that the callback closure would otherwise bind to).
 local function log(fmt, ...)
     print(("[%s] " .. fmt):format(AnimalWaste.MOD_NAME, ...))
+end
+
+-- Gated diagnostic logger. No-op unless AnimalWaste.DEBUG.
+local function debugLog(fmt, ...)
+    if AnimalWaste.DEBUG then
+        print(("[%s] DEBUG " .. fmt):format(AnimalWaste.MOD_NAME, ...))
+    end
 end
 
 AnimalWaste.SETTINGS = {
@@ -32,9 +44,9 @@ AnimalWaste.SETTINGS = {
     },
 }
 
-AnimalWaste.settingsInjected = false
-AnimalWaste.hooksInstalled   = false
-AnimalWaste.rlPresent        = false
+AnimalWaste.settingsInjected      = false
+AnimalWaste.extraWasteHookInstalled = false
+AnimalWaste.rlPresent             = false
 AnimalWaste.rlVersion        = nil
 AnimalWaste.rlName           = nil
 
@@ -126,42 +138,76 @@ end
 -- value or the updateOutput chain, so milk is physically untouchable here.
 -- ---------------------------------------------------------------------
 
--- Extra (M-1)x liquid manure, mirroring vanilla's foodFactor * litersPerHour.
-local function addExtraLiquidManure(self, M, foodFactor, timeAdjustment)
+-- Extra (M-1)x liquid manure: scale the husbandry's CURRENT per-hour slurry rate
+-- (spec.litersPerHour) directly, rather than re-deriving vanilla's
+-- foodFactor*litersPerHour. Under Realistic Livestock spec.litersPerHour is RL's
+-- sum of per-animal slurry output, refreshed each hour by RL's onHourChanged
+-- append -- so as long as we run AFTER RL (see installExtraWasteHookLast),
+-- scaling it composes with RL's actual production. Returns litres added.
+-- Defensive: feature-detects the API and pcall-guards the write.
+local function addExtraLiquidManure(self, M, timeAdjustment)
     local spec = self.spec_husbandryLiquidManure
-    if spec == nil or spec.litersPerHour == nil or spec.litersPerHour <= 0 then return end
+    if spec == nil or spec.litersPerHour == nil or spec.litersPerHour <= 0 then return 0 end
+    if spec.fillType == nil or self.addHusbandryFillLevelFromTool == nil then return 0 end
 
-    local extra = foodFactor * spec.litersPerHour * (M - 1) * timeAdjustment
-    if extra > 0 then
+    local extra = spec.litersPerHour * (M - 1) * timeAdjustment
+    if extra <= 0 then return 0 end
+
+    local ok = pcall(function()
         self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extra, spec.fillType, nil, nil, nil)
-    end
+    end)
+    return ok and extra or 0
 end
 
--- Extra (M-1)x straw consumption + matching manure, mirroring vanilla's
--- straw->manure delta maths for the extra portion only.
-local function addExtraManure(self, M, foodFactor, timeAdjustment)
+-- Extra (M-1)x manure: scale the husbandry's CURRENT per-hour manure rate
+-- (spec.outputLitersPerHour) directly -- RL refreshes this from its per-animal
+-- model each hour, so scaling it composes with RL instead of re-deriving the
+-- vanilla foodFactor formula. Straw is drawn BEST-EFFORT (so the multiplier still
+-- consumes more straw when available) but NEVER gates the manure: running last,
+-- vanilla + RL have already consumed this hour's straw, so a straw-gated formula
+-- would starve the top-up to zero. Returns manureAdded, strawConsumed.
+-- Defensive throughout (feature-detect + pcall).
+local function addExtraManure(self, M, timeAdjustment)
     local spec = self.spec_husbandryStraw
-    if spec == nil
-            or spec.inputLitersPerHour == nil or spec.inputLitersPerHour <= 0
-            or spec.outputLitersPerHour == nil or spec.outputLitersPerHour <= 0 then
-        return
+    if spec == nil or spec.outputLitersPerHour == nil or spec.outputLitersPerHour <= 0 then
+        return 0, 0
     end
 
-    local extraStraw = spec.inputLitersPerHour * (M - 1) * timeAdjustment
-    if extraStraw <= 0 then return end
-
-    local consumed = extraStraw - self:removeHusbandryFillLevel(self:getOwnerFarmId(), extraStraw, spec.inputFillType)
-    if consumed > 0 then
-        local extraManure = foodFactor * spec.outputLitersPerHour * (consumed / extraStraw) * timeAdjustment
-        if extraManure > 0 then
-            self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extraManure, spec.outputFillType, nil, nil, nil)
+    -- Best-effort extra straw draw -- does NOT gate the manure top-up below.
+    local strawConsumed = 0
+    if spec.inputLitersPerHour ~= nil and spec.inputLitersPerHour > 0
+            and spec.inputFillType ~= nil and self.removeHusbandryFillLevel ~= nil then
+        local extraStraw = spec.inputLitersPerHour * (M - 1) * timeAdjustment
+        if extraStraw > 0 then
+            local ok, notRemoved = pcall(function()
+                return self:removeHusbandryFillLevel(self:getOwnerFarmId(), extraStraw, spec.inputFillType)
+            end)
+            if ok and type(notRemoved) == "number" then
+                strawConsumed = extraStraw - notRemoved
+                if strawConsumed > 0 and self.updateStrawPlane ~= nil then
+                    pcall(function() self:updateStrawPlane() end)
+                end
+            end
         end
-        self:updateStrawPlane()
     end
+
+    -- Manure top-up: proportional to the refreshed output rate, NOT gated on straw.
+    if spec.outputFillType == nil or self.addHusbandryFillLevelFromTool == nil then
+        return 0, strawConsumed
+    end
+    local extraManure = spec.outputLitersPerHour * (M - 1) * timeAdjustment
+    if extraManure <= 0 then return 0, strawConsumed end
+
+    local ok = pcall(function()
+        self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extraManure, spec.outputFillType, nil, nil, nil)
+    end)
+    return (ok and extraManure or 0), strawConsumed
 end
 
--- Appended to PlaceableHusbandry.onHourChanged. Runs once per in-game hour,
--- AFTER the base cycle has produced its 1x of everything (milk included).
+-- Appended to PlaceableHusbandry.onHourChanged, installed LAST from loadMap (see
+-- installExtraWasteHookLast) so it runs AFTER Realistic Livestock's onHourChanged
+-- append has refreshed outputLitersPerHour / litersPerHour for the hour. We then
+-- top up the extra (M-1)x of manure and slurry by scaling those refreshed rates.
 local function onHourChangedAddExtraWaste(self, currentHour)
     if not self.isServer then return end
 
@@ -171,33 +217,55 @@ local function onHourChangedAddExtraWaste(self, currentHour)
     local husbandrySpec = self.spec_husbandry
     if husbandrySpec == nil then return end
 
-    -- The base updateProduction stored this hour's foodFactor here; it is the
-    -- same value vanilla used to size the 1x manure/slurry we are scaling.
-    local foodFactor = husbandrySpec.productionFactor
-    if foodFactor == nil or foodFactor <= 0 then return end
+    -- IMPORTANT: we no longer GATE on productionFactor. Under Realistic Livestock
+    -- it can read 0 even while RL is producing manure (RL drives output
+    -- per-animal, not via the vanilla food factor), which would block ALL scaling
+    -- -- the "10x has no effect under RL" bug. We scale the husbandry's refreshed
+    -- output rates directly instead; productionFactor is still LOGGED for
+    -- diagnosis.
+    local timeAdjustment = (g_currentMission ~= nil and g_currentMission.environment ~= nil
+        and g_currentMission.environment.timeAdjustment) or 1
 
-    local timeAdjustment = g_currentMission.environment.timeAdjustment
+    local strawSpec  = self.spec_husbandryStraw
+    local liquidSpec = self.spec_husbandryLiquidManure
 
-    addExtraManure(self, M, foodFactor, timeAdjustment)
-    addExtraLiquidManure(self, M, foodFactor, timeAdjustment)
+    local manureAdded, strawConsumed = addExtraManure(self, M, timeAdjustment)
+    local liquidAdded = addExtraLiquidManure(self, M, timeAdjustment)
+
+    -- One-off diagnostic (per shed per hour, DEBUG-gated): shows where a zero came
+    -- from before the reorder and that the top-up is non-zero after it.
+    debugLog("extra-waste shed=%s M=%sx foodFactor=%s strawIn/hr=%s manureOut/hr=%s slurry/hr=%s -> strawConsumed=%.1f manureAdded=%.1f slurryAdded=%.1f",
+        tostring(self.uniqueId or self), tostring(M),
+        tostring(husbandrySpec.productionFactor),
+        tostring(strawSpec and strawSpec.inputLitersPerHour),
+        tostring(strawSpec and strawSpec.outputLitersPerHour),
+        tostring(liquidSpec and liquidSpec.litersPerHour),
+        strawConsumed or 0, manureAdded or 0, liquidAdded or 0)
 end
 
 
-function AnimalWaste:installHooks()
+-- Install the extra-waste append from loadMap (NOT at mod-load), guarded against
+-- re-entry. Every mod's source -- including Realistic Livestock -- has finished
+-- appending to PlaceableHusbandry.onHourChanged before any loadMap runs, so
+-- appending HERE lands us LAST in the chain: we run after the vanilla cycle AND
+-- after RL's onHourChanged append has refreshed outputLitersPerHour/litersPerHour
+-- for the hour. (Appending at mod-load could land us BEFORE RL's append, reading
+-- ~0 and scaling nothing -- the "10x has no effect under RL" bug this fixes.)
+-- Still an append, never an overwrite, so we never become a super-injected link
+-- in any husbandry chain and never clobber RL.
+function AnimalWaste:installExtraWasteHookLast()
+    if AnimalWaste.extraWasteHookInstalled then return end
     if PlaceableHusbandry == nil or PlaceableHusbandry.onHourChanged == nil then
         Logging.error("[%s] PlaceableHusbandry.onHourChanged missing; mod will not scale manure/slurry",
                       AnimalWaste.MOD_NAME)
-        return false
+        return
     end
 
-    -- Append (never overwrite) so we run after the untouched production cycle
-    -- and never become a super-injected link in any husbandry chain.
     PlaceableHusbandry.onHourChanged = Utils.appendedFunction(
         PlaceableHusbandry.onHourChanged, onHourChangedAddExtraWaste)
 
-    AnimalWaste.hooksInstalled = true
-    log("hooks installed (onHourChanged extra-waste append)")
-    return true
+    AnimalWaste.extraWasteHookInstalled = true
+    log("extra-waste hook installed LAST at loadMap (runs after RL's onHourChanged append)")
 end
 
 
@@ -208,6 +276,12 @@ end
 function AnimalWaste:loadMap(filename)
     self:detectRealisticLivestock()
     self:loadFromXML()
+
+    -- Install the extra-waste scaling hook HERE (not at mod-load) so it lands LAST
+    -- in the onHourChanged chain, after Realistic Livestock's append -- see
+    -- installExtraWasteHookLast. This is the core of the RL-order fix.
+    self:installExtraWasteHookLast()
+
     log("v%s loaded, multiplier=%sx", AnimalWaste.VERSION, tostring(AnimalWaste.multiplier))
 end
 
@@ -432,7 +506,9 @@ end
 -- Top-level wiring
 -- ---------------------------------------------------------------------
 
-AnimalWaste:installHooks()
+-- NOTE: the extra-waste onHourChanged append is installed from loadMap
+-- (installExtraWasteHookLast), NOT here at mod-load, so it lands last in the
+-- chain after Realistic Livestock's append.
 
 if InGameMenuSettingsFrame ~= nil then
     if InGameMenuSettingsFrame.onFrameOpen ~= nil then
