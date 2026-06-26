@@ -9,5 +9,12 @@
         <text name="aw_settings_husbandryProductionRate_texts_3"  text="3x"/>
         <text name="aw_settings_husbandryProductionRate_texts_4"  text="5x"/>
         <text name="aw_settings_husbandryProductionRate_texts_5"  text="10x"/>
+        <text name="aw_settings_strawUsageRate_label"             text="Straw Usage Rate"/>
+        <text name="aw_settings_strawUsageRate_tooltip"           text="Multiplies how much straw your cow sheds consume as bedding, independently of the production rate. Change applies on the next in-game hour."/>
+        <text name="aw_settings_strawUsageRate_texts_1"           text="1x"/>
+        <text name="aw_settings_strawUsageRate_texts_2"           text="5x"/>
+        <text name="aw_settings_strawUsageRate_texts_3"           text="10x"/>
+        <text name="aw_settings_strawUsageRate_texts_4"           text="15x"/>
+        <text name="aw_settings_strawUsageRate_texts_5"           text="20x"/>
     </texts>
 </l10n>

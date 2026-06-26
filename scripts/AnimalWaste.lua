@@ -1,17 +1,23 @@
 -- Animal Waste Production Rate
 --
--- Scales straw consumption and manure / liquid manure output on cow
--- sheds by a single multiplier (1x / 2x / 3x / 5x / 10x). The choice comes from
--- a row injected into the vanilla General Settings page and persists
--- per-savegame. Compatible with Realistic Livestock.
+-- Two INDEPENDENT, decoupled multipliers on cow sheds, each a row injected into
+-- the vanilla General Settings page and persisted per-savegame:
+--   * husbandryProductionRate -- manure / liquid manure OUTPUT only (1/2/3/5/10x)
+--   * strawUsageRate          -- straw CONSUMPTION only             (1/5/10/15/20x)
+-- The production-rate slider no longer touches straw; the straw slider only
+-- burns extra straw and never produces manure. Compatible with Realistic
+-- Livestock (both hooks run LAST, after RL's onHourChanged append).
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
 AnimalWaste.VERSION  = "1.1.0.2"
 
--- Current scale factor. Updated by the Settings click callback and by
--- loadFromXML. Defaults to 1x (pass-through) until either fires.
+-- Current scale factors. Updated by the Settings click callbacks and by
+-- loadFromXML. Both default to 1x (pass-through) until either fires.
+--   multiplier      -- manure / liquid manure output
+--   strawMultiplier -- straw consumption (independent of multiplier)
 AnimalWaste.multiplier = 1
+AnimalWaste.strawMultiplier = 1
 
 -- Diagnostic logging. OFF for normal play; the only DEBUG-gated line is the
 -- per-shed hourly extra-waste trace, used when testing the RL-order fix. Flip to
@@ -42,10 +48,21 @@ AnimalWaste.SETTINGS = {
             log("multiplier set to %sx", tostring(newValue))
         end,
     },
+    ["strawUsageRate"] = {
+        index    = 3,
+        type     = "MultiTextOption",
+        default  = 1,                  -- 1-based: state 1 => values[1] => 1x
+        values   = { 1, 5, 10, 15, 20 },
+        callback = function(name, newValue)
+            AnimalWaste.strawMultiplier = newValue
+            log("straw usage set to %sx", tostring(newValue))
+        end,
+    },
 }
 
 AnimalWaste.settingsInjected      = false
 AnimalWaste.extraWasteHookInstalled = false
+AnimalWaste.strawBurnHookInstalled  = false
 AnimalWaste.rlPresent             = false
 AnimalWaste.rlVersion        = nil
 AnimalWaste.rlName           = nil
@@ -162,46 +179,58 @@ end
 -- Extra (M-1)x manure: scale the husbandry's CURRENT per-hour manure rate
 -- (spec.outputLitersPerHour) directly -- RL refreshes this from its per-animal
 -- model each hour, so scaling it composes with RL instead of re-deriving the
--- vanilla foodFactor formula. Straw is drawn BEST-EFFORT (so the multiplier still
--- consumes more straw when available) but NEVER gates the manure: running last,
--- vanilla + RL have already consumed this hour's straw, so a straw-gated formula
--- would starve the top-up to zero. Returns manureAdded, strawConsumed.
+-- vanilla foodFactor formula. OUTPUT ONLY: this path no longer consumes any
+-- straw -- straw consumption is owned exclusively by the independent strawUsageRate
+-- slider (see addExtraStrawBurn). Returns manureAdded.
 -- Defensive throughout (feature-detect + pcall).
 local function addExtraManure(self, M, timeAdjustment)
     local spec = self.spec_husbandryStraw
     if spec == nil or spec.outputLitersPerHour == nil or spec.outputLitersPerHour <= 0 then
-        return 0, 0
+        return 0
     end
 
-    -- Best-effort extra straw draw -- does NOT gate the manure top-up below.
-    local strawConsumed = 0
-    if spec.inputLitersPerHour ~= nil and spec.inputLitersPerHour > 0
-            and spec.inputFillType ~= nil and self.removeHusbandryFillLevel ~= nil then
-        local extraStraw = spec.inputLitersPerHour * (M - 1) * timeAdjustment
-        if extraStraw > 0 then
-            local ok, notRemoved = pcall(function()
-                return self:removeHusbandryFillLevel(self:getOwnerFarmId(), extraStraw, spec.inputFillType)
-            end)
-            if ok and type(notRemoved) == "number" then
-                strawConsumed = extraStraw - notRemoved
-                if strawConsumed > 0 and self.updateStrawPlane ~= nil then
-                    pcall(function() self:updateStrawPlane() end)
-                end
-            end
-        end
-    end
-
-    -- Manure top-up: proportional to the refreshed output rate, NOT gated on straw.
+    -- Manure top-up: proportional to the refreshed output rate. No straw draw here.
     if spec.outputFillType == nil or self.addHusbandryFillLevelFromTool == nil then
-        return 0, strawConsumed
+        return 0
     end
     local extraManure = spec.outputLitersPerHour * (M - 1) * timeAdjustment
-    if extraManure <= 0 then return 0, strawConsumed end
+    if extraManure <= 0 then return 0 end
 
     local ok = pcall(function()
         self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extraManure, spec.outputFillType, nil, nil, nil)
     end)
-    return (ok and extraManure or 0), strawConsumed
+    return ok and extraManure or 0
+end
+
+-- Extra (S-1)x straw consumption -- the independent strawUsageRate slider. Scales
+-- the husbandry's CURRENT per-hour straw draw (spec.inputLitersPerHour, refreshed
+-- each hour by RL's onHourChanged append under RL, or vanilla otherwise) and
+-- removes that extra straw from the store. Adds NO manure -- consumption only,
+-- fully decoupled from the manure/slurry multiplier. removeHusbandryFillLevel
+-- clamps at 0, so the store can never go negative. Returns strawConsumed.
+-- Defensive throughout (feature-detect + pcall).
+local function addExtraStrawBurn(self, S, timeAdjustment)
+    local spec = self.spec_husbandryStraw
+    if spec == nil or spec.inputLitersPerHour == nil or spec.inputLitersPerHour <= 0 then
+        return 0
+    end
+    if spec.inputFillType == nil or self.removeHusbandryFillLevel == nil then
+        return 0
+    end
+
+    local extraStraw = spec.inputLitersPerHour * (S - 1) * timeAdjustment
+    if extraStraw <= 0 then return 0 end
+
+    local ok, notRemoved = pcall(function()
+        return self:removeHusbandryFillLevel(self:getOwnerFarmId(), extraStraw, spec.inputFillType)
+    end)
+    if not ok or type(notRemoved) ~= "number" then return 0 end
+
+    local strawConsumed = extraStraw - notRemoved
+    if strawConsumed > 0 and self.updateStrawPlane ~= nil then
+        pcall(function() self:updateStrawPlane() end)
+    end
+    return strawConsumed
 end
 
 -- Appended to PlaceableHusbandry.onHourChanged, installed LAST from loadMap (see
@@ -229,18 +258,41 @@ local function onHourChangedAddExtraWaste(self, currentHour)
     local strawSpec  = self.spec_husbandryStraw
     local liquidSpec = self.spec_husbandryLiquidManure
 
-    local manureAdded, strawConsumed = addExtraManure(self, M, timeAdjustment)
+    local manureAdded = addExtraManure(self, M, timeAdjustment)
     local liquidAdded = addExtraLiquidManure(self, M, timeAdjustment)
 
     -- One-off diagnostic (per shed per hour, DEBUG-gated): shows where a zero came
     -- from before the reorder and that the top-up is non-zero after it.
-    debugLog("extra-waste shed=%s M=%sx foodFactor=%s strawIn/hr=%s manureOut/hr=%s slurry/hr=%s -> strawConsumed=%.1f manureAdded=%.1f slurryAdded=%.1f",
+    debugLog("extra-waste shed=%s M=%sx foodFactor=%s manureOut/hr=%s slurry/hr=%s -> manureAdded=%.1f slurryAdded=%.1f",
         tostring(self.uniqueId or self), tostring(M),
         tostring(husbandrySpec.productionFactor),
-        tostring(strawSpec and strawSpec.inputLitersPerHour),
         tostring(strawSpec and strawSpec.outputLitersPerHour),
         tostring(liquidSpec and liquidSpec.litersPerHour),
-        strawConsumed or 0, manureAdded or 0, liquidAdded or 0)
+        manureAdded or 0, liquidAdded or 0)
+end
+
+
+-- Appended to PlaceableHusbandry.onHourChanged, installed LAST from loadMap (see
+-- installStrawBurnHookLast) so it runs AFTER Realistic Livestock's onHourChanged
+-- append has refreshed inputLitersPerHour for the hour. Burns the extra (S-1)x of
+-- straw the strawUsageRate slider asks for. Independent of the manure multiplier:
+-- gated only on its own multiplier S, so straw scaling works even at 1x manure.
+local function onHourChangedAddExtraStrawBurn(self, currentHour)
+    if not self.isServer then return end
+
+    local S = AnimalWaste.strawMultiplier or 1
+    if S == 1 or not isCowHusbandry(self) then return end
+
+    local timeAdjustment = (g_currentMission ~= nil and g_currentMission.environment ~= nil
+        and g_currentMission.environment.timeAdjustment) or 1
+
+    local strawConsumed = addExtraStrawBurn(self, S, timeAdjustment)
+
+    local strawSpec = self.spec_husbandryStraw
+    debugLog("straw-burn shed=%s S=%sx strawIn/hr=%s -> strawConsumed=%.1f",
+        tostring(self.uniqueId or self), tostring(S),
+        tostring(strawSpec and strawSpec.inputLitersPerHour),
+        strawConsumed or 0)
 end
 
 
@@ -269,6 +321,28 @@ function AnimalWaste:installExtraWasteHookLast()
 end
 
 
+-- Install the straw-burn append from loadMap (NOT at mod-load), same reasoning as
+-- installExtraWasteHookLast: appending HERE lands us LAST in the onHourChanged
+-- chain, after Realistic Livestock's append has refreshed inputLitersPerHour for
+-- the hour, so the strawUsageRate slider scales RL's actual straw rate rather than
+-- a stale/zero value. Still an append, never an overwrite. Independent of the
+-- extra-waste hook so the two multipliers stay fully decoupled.
+function AnimalWaste:installStrawBurnHookLast()
+    if AnimalWaste.strawBurnHookInstalled then return end
+    if PlaceableHusbandry == nil or PlaceableHusbandry.onHourChanged == nil then
+        Logging.error("[%s] PlaceableHusbandry.onHourChanged missing; mod will not scale straw usage",
+                      AnimalWaste.MOD_NAME)
+        return
+    end
+
+    PlaceableHusbandry.onHourChanged = Utils.appendedFunction(
+        PlaceableHusbandry.onHourChanged, onHourChangedAddExtraStrawBurn)
+
+    AnimalWaste.strawBurnHookInstalled = true
+    log("straw-burn hook installed LAST at loadMap (runs after RL's onHourChanged append)")
+end
+
+
 -- ---------------------------------------------------------------------
 -- Lifecycle
 -- ---------------------------------------------------------------------
@@ -281,8 +355,10 @@ function AnimalWaste:loadMap(filename)
     -- in the onHourChanged chain, after Realistic Livestock's append -- see
     -- installExtraWasteHookLast. This is the core of the RL-order fix.
     self:installExtraWasteHookLast()
+    self:installStrawBurnHookLast()
 
-    log("v%s loaded, multiplier=%sx", AnimalWaste.VERSION, tostring(AnimalWaste.multiplier))
+    log("v%s loaded, multiplier=%sx, straw usage=%sx",
+        AnimalWaste.VERSION, tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier))
 end
 
 
@@ -446,10 +522,13 @@ function AnimalWaste.onSettingChanged(_, state, button)
     if setting.callback then setting.callback(name, setting.values[state]) end
 
     -- Multiplayer: if we're the host, push the change out to all clients so
-    -- their menus track ours. Only the host changes the setting (client lock is
-    -- a later task); the host gate makes this a no-op in SP and on clients.
-    if name == "husbandryProductionRate" and AnimalWaste.isMultiplayerHost() then
-        AnimalWasteSettingsEvent.broadcast(state)
+    -- their menus track ours. The event carries every host-authoritative setting,
+    -- so a change to either slider syncs both. Only the host changes the setting
+    -- (client lock is a later task); the host gate makes this a no-op in SP and on
+    -- clients.
+    if (name == "husbandryProductionRate" or name == "strawUsageRate")
+            and AnimalWaste.isMultiplayerHost() then
+        AnimalWasteSettingsEvent.broadcast()
     end
 end
 
@@ -482,23 +561,30 @@ function AnimalWaste.isSettingEditable()
 end
 
 
--- Client-side: apply a state pushed from the server and refresh the menu row
--- if it has been built. Does not re-broadcast (clients never send), and
--- setState without forceEvent does not re-fire onSettingChanged -- so there is
--- no echo loop back to the host.
-function AnimalWaste:applySyncedState(state)
-    local setting = AnimalWaste.SETTINGS.husbandryProductionRate
+-- Apply one setting's synced state and refresh its menu row, if built. Runs the
+-- setting's own callback (so multiplier / strawMultiplier track), and setState
+-- without forceEvent does not re-fire onSettingChanged -- so there is no echo
+-- loop back to the host.
+local function applyOneSyncedSetting(name, state)
+    local setting = AnimalWaste.SETTINGS[name]
     if setting == nil then return end
     if state == nil or state < 1 or state > #setting.values then return end
 
     setting.state = state
-    AnimalWaste.multiplier = setting.values[state]
-
+    if setting.callback then
+        setting.callback(name, setting.values[state])
+    end
     if setting.element ~= nil then
         setting.element:setState(state)
     end
+end
 
-    log("multiplier synced to %sx (state %s)", tostring(AnimalWaste.multiplier), tostring(state))
+-- Client-side: apply states pushed from the server. Clients never re-broadcast.
+function AnimalWaste:applySyncedSettings(rateState, strawState)
+    applyOneSyncedSetting("husbandryProductionRate", rateState)
+    applyOneSyncedSetting("strawUsageRate", strawState)
+    log("settings synced: %sx manure, %sx straw",
+        tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier))
 end
 
 
@@ -542,9 +628,7 @@ if FSBaseMission ~= nil and FSBaseMission.onConnectionFinishedLoading ~= nil the
         FSBaseMission.onConnectionFinishedLoading,
         function(mission, connection)
             if not AnimalWaste.isMultiplayerHost() then return end
-            local setting = AnimalWaste.SETTINGS.husbandryProductionRate
-            local state = (setting and (setting.state or setting.default)) or 1
-            AnimalWasteSettingsEvent.sendToClient(connection, state)
+            AnimalWasteSettingsEvent.sendToClient(connection)
         end)
 else
     Logging.error("[%s] FSBaseMission.onConnectionFinishedLoading missing; MP join-sync disabled",
