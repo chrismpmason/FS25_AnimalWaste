@@ -30,6 +30,18 @@ AnimalWaste.pendingPacks = {}
 -- always print.
 AnimalWaste.DEBUG = false
 
+-- ---------------------------------------------------------------------
+-- Deep Litter visual (Phase 2): the rising muck mesh.
+--
+-- A shed opts in by including a node named EXACTLY AW_MUCK_PLANE_NODE in its
+-- i3d (authored as a sibling of the vanilla strawPlanes group). We drive that
+-- node's local Y from the pack value, mirroring the vanilla strawPlane rise.
+-- Both numbers are deliberately exposed here for live tuning.
+-- ---------------------------------------------------------------------
+AnimalWaste.AW_MUCK_PLANE_NODE  = "AW_muckPlane"  -- exact node name searched per shed
+AnimalWaste.AW_MUCK_FULL_PACK   = 20000           -- litres of pack that = full height
+AnimalWaste.AW_MUCK_FULL_HEIGHT = 0.10            -- metres risen above rest at full pack
+
 -- Must be declared before SETTINGS (FS25 has a global `log` with
 -- different semantics that the callback closure would otherwise bind to).
 local function log(fmt, ...)
@@ -327,6 +339,7 @@ function AnimalWaste.muckOutShed(placeable)
     placeable:addHusbandryFillLevelFromTool(
         placeable:getOwnerFarmId(), depth, strawSpec.outputFillType, nil, nil, nil)
     setPackDepth(placeable, 0)
+    AnimalWaste.updateMuckPlane(placeable)  -- drop the visual back to rest as the pack zeroes
     log("muck-out: released %.0f L of manure from shed", depth)
 
     if AnimalWaste.isMultiplayerHost() then
@@ -339,6 +352,84 @@ end
 -- client never simulates the pack.
 function AnimalWaste.applyPackSync(placeable, liters)
     setPackDepth(placeable, liters)
+    -- Visual is driven on clients too, straight off the synced pack value.
+    AnimalWaste.updateMuckPlane(placeable)
+end
+
+
+-- ---------------------------------------------------------------------
+-- Deep Litter visual: the rising "AW_muckPlane" mesh.
+--
+-- Opt-in per shed: a shed animates only if its i3d contains one or more nodes
+-- named exactly AnimalWaste.AW_MUCK_PLANE_NODE. Multi-pen sheds (e.g.
+-- cowShedScroft4) author one plane per pen; single-pen sheds author one. Sheds
+-- with none are completely unaffected -- the lookup caches an empty list so the
+-- tree is searched at most once and opted-out sheds cost nothing thereafter. Each
+-- node's authored local translation is captured once as its rest ("empty") pose;
+-- we then drive only the Y of each from the pack, by the same ratio.
+-- ---------------------------------------------------------------------
+
+-- Recursively collect EVERY descendant of `node` named exactly `name` into `out`,
+-- using only core scene-graph getters (works on any game build).
+local function collectChildrenByName(node, name, out)
+    if node == nil or node == 0 then return end
+    if getName(node) == name then out[#out + 1] = node end
+    for i = 0, getNumOfChildren(node) - 1 do
+        collectChildrenByName(getChildAt(node, i), name, out)
+    end
+end
+
+-- Resolve (once per shed) ALL AW_muckPlane nodes and cache them on the husbandry
+-- spec as a list of { node, restX, restY, restZ } (each one's authored rest
+-- pose). The list is cached even when empty, so the tree is searched at most once
+-- and opted-out sheds never retry. Returns the (possibly empty) list.
+local function resolveMuckPlanes(placeable)
+    local spec = placeable.spec_husbandry
+    if spec == nil then return nil end
+
+    if spec.awMuckPlanes == nil then
+        local planes = {}
+        local root = placeable.rootNode
+        if root ~= nil then
+            local nodes = {}
+            collectChildrenByName(root, AnimalWaste.AW_MUCK_PLANE_NODE, nodes)
+            for _, node in ipairs(nodes) do
+                local rx, ry, rz = getTranslation(node)
+                planes[#planes + 1] = { node = node, restX = rx, restY = ry, restZ = rz }
+            end
+        end
+        spec.awMuckPlanes = planes  -- empty list = searched, none present
+        -- One-off diagnostic (once per shed, on first resolve / load): how many
+        -- AW_muckPlane nodes did the driver actually find in this placeable?
+        log("shed %s: resolved %d muck plane(s)", tostring(placeable.uniqueId or placeable), #planes)
+    end
+
+    return spec.awMuckPlanes
+end
+
+-- Drive EVERY AW_muckPlane in a shed from its current pack, mirroring the vanilla
+-- strawPlane rise: each node rises from its own authored Y by the SAME ratio --
+-- newY = restY + clamp(pack / AW_MUCK_FULL_PACK, 0, 1) * AW_MUCK_FULL_HEIGHT --
+-- keeping each node's authored X/Z. Visual only, so it runs on the server AND on
+-- clients (clients off the synced pack). Fully graceful: a shed with no
+-- AW_muckPlane node is a silent no-op. A single-plane shed drives its one node
+-- exactly as before. Safe to call as often as needed.
+function AnimalWaste.updateMuckPlane(placeable)
+    if placeable == nil then return end
+    local planes = resolveMuckPlanes(placeable)
+    if planes == nil or #planes == 0 then return end  -- opted out -- unaffected
+
+    local fullPack = AnimalWaste.AW_MUCK_FULL_PACK
+    local ratio = 0
+    if fullPack and fullPack > 0 then
+        ratio = getPackDepth(placeable) / fullPack
+        if ratio < 0 then ratio = 0 elseif ratio > 1 then ratio = 1 end
+    end
+    local rise = ratio * AnimalWaste.AW_MUCK_FULL_HEIGHT
+
+    for _, p in ipairs(planes) do
+        setTranslation(p.node, p.restX, p.restY + rise, p.restZ)
+    end
 end
 
 
@@ -381,9 +472,15 @@ function AnimalWaste.deepLitterCaptureTick(self, currentHour)
         tostring(self.uniqueId or self),
         AnimalWaste.deepLitterEnabled and "on" or "off")
 
-    if not AnimalWaste.deepLitterEnabled then return end
+    if AnimalWaste.deepLitterEnabled then
+        AnimalWaste.divertManureToPack(self)
+    end
 
-    AnimalWaste.divertManureToPack(self)
+    -- Keep the rising-muck visual in step with the pack each hour (server-side;
+    -- clients are driven from the synced pack in applyPackSync). Runs regardless
+    -- of the toggle so the mesh stays correct, and is a no-op for sheds without
+    -- an AW_muckPlane node.
+    AnimalWaste.updateMuckPlane(self)
 end
 
 
@@ -559,6 +656,8 @@ function AnimalWaste:loadMap(filename)
             "consoleDLTest", AnimalWaste)
         addConsoleCommand("awAddManure", "Deep Litter test: add [litres] manure (default 20000) to the nearest cow shed",
             "consoleAddManure", AnimalWaste)
+        addConsoleCommand("awSetPack", "Deep Litter test: set the nearest cow shed's pack to [litres] (default 20000) and refresh the muck plane now",
+            "consoleSetPack", AnimalWaste)
     end
 
     log("v%s loaded, multiplier=%sx, deep litter %s", AnimalWaste.VERSION,
@@ -1052,11 +1151,73 @@ function AnimalWaste:consoleAddManure(litresArg)
 end
 
 
+-- Console command: awSetPack [litres]
+-- Sets the deep-litter PACK of the nearest cow shed directly to [litres] (default
+-- 20000, clamped >= 0), then refreshes the muck plane via the SAME updateMuckPlane
+-- the hourly tick uses -- so the plane jumps to the new height instantly, no sleep
+-- or hour-change. Syncs the new pack to clients so their visual updates too.
+-- Server/host only; dev-only (stripped at final cleanup). Reuses awAddManure's
+-- nearest-husbandry targeting.
+function AnimalWaste:consoleSetPack(litresArg)
+    if not AnimalWaste.isServerSide() then
+        return "AnimalWaste: awSetPack must run on the host/server."
+    end
+
+    local litres = tonumber(litresArg)
+    if litres == nil then litres = 20000 end
+    if litres < 0 then litres = 0 end
+
+    -- Same nearest-husbandry targeting as awAddManure.
+    local target, how = findNearestCowHusbandry(), "nearest"
+    if target == nil then
+        target, how = firstCowHusbandry(), "first (nearest-targeting unavailable)"
+    end
+    if target == nil then
+        return "AnimalWaste: awSetPack found no cow husbandry."
+    end
+
+    local id     = tostring(target.uniqueId or target)
+    local before = getPackDepth(target)
+
+    setPackDepth(target, litres)
+    local after = getPackDepth(target)
+
+    -- Jump the visual to the new height now (same path the hourly tick uses).
+    AnimalWaste.updateMuckPlane(target)
+
+    -- Sync the new pack to clients so their muck plane updates too.
+    if AnimalWaste.isMultiplayerHost() then
+        AnimalWastePackEvent.broadcastPack(target, after)
+    end
+
+    -- Resulting plane ratio/height (mirrors updateMuckPlane's maths).
+    local full   = AnimalWaste.AW_MUCK_FULL_PACK
+    local ratio  = (full and full > 0) and math.min(math.max(after / full, 0), 1) or 0
+    local height = ratio * AnimalWaste.AW_MUCK_FULL_HEIGHT
+
+    local line = string.format(
+        "AnimalWaste: awSetPack shed=%s pack %.0f -> %.0f, plane ratio %.2f (%.2f m of %.2f), %s shed.",
+        id, before, after, ratio, height, AnimalWaste.AW_MUCK_FULL_HEIGHT, how)
+    log("%s", line)
+    return line
+end
+
+
 -- ---------------------------------------------------------------------
 -- Top-level wiring
 -- ---------------------------------------------------------------------
 
 AnimalWaste:installHooks()
+
+-- Deep Litter visual: set each shed's AW_muckPlane to match its pack once the
+-- placeable's nodes are ready. onFinalizePlacement fires per husbandry on both
+-- fresh placement and savegame load (server and client), so the rising-muck mesh
+-- is correct immediately after a reload. No-op for sheds without the node.
+if PlaceableHusbandry ~= nil and PlaceableHusbandry.onFinalizePlacement ~= nil then
+    PlaceableHusbandry.onFinalizePlacement = Utils.appendedFunction(
+        PlaceableHusbandry.onFinalizePlacement,
+        function(self) AnimalWaste.updateMuckPlane(self) end)
+end
 
 if InGameMenuSettingsFrame ~= nil then
     if InGameMenuSettingsFrame.onFrameOpen ~= nil then
