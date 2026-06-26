@@ -10,7 +10,7 @@
 
 AnimalWaste = {}
 AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
-AnimalWaste.VERSION  = "1.1.0.2"
+AnimalWaste.VERSION  = "1.2.0.0"
 
 -- Current scale factors. Updated by the Settings click callbacks and by
 -- loadFromXML. Both default to 1x (pass-through) until either fires.
