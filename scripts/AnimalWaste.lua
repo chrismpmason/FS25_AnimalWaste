@@ -13,15 +13,19 @@ AnimalWaste.MOD_NAME = "FS25_AnimalWaste"
 AnimalWaste.VERSION  = "1.2.0.0"
 
 -- Current scale factors. Updated by the Settings click callbacks and by
--- loadFromXML. Both default to 1x (pass-through) until either fires.
+-- loadFromXML. All default to 1x (pass-through) until they fire.
 --   multiplier      -- manure / liquid manure output
 --   strawMultiplier -- straw consumption (independent of multiplier)
+--   milkMultiplier  -- milk output (independent of both)
 AnimalWaste.multiplier = 1
 AnimalWaste.strawMultiplier = 1
+AnimalWaste.milkMultiplier = 1
 
--- Diagnostic logging. OFF for normal play; the only DEBUG-gated line is the
--- per-shed hourly extra-waste trace, used when testing the RL-order fix. Flip to
--- true to re-enable it.
+-- Diagnostic logging. OFF for normal play. The DEBUG-gated lines are the per-shed
+-- hourly extra-waste / straw / milk traces. Flip to true to confirm milk (and
+-- manure/straw) scaling in live play -- e.g. once cows are lactating, set this true
+-- to watch the extra-milk proof line print productionFactor/globalProductionFactor
+-- and the per-hour litres added.
 AnimalWaste.DEBUG = false
 
 -- Must be declared before SETTINGS (FS25 has a global `log` with
@@ -58,11 +62,22 @@ AnimalWaste.SETTINGS = {
             log("straw usage set to %sx", tostring(newValue))
         end,
     },
+    ["milkUsageRate"] = {
+        index    = 4,
+        type     = "MultiTextOption",
+        default  = 1,                  -- 1-based: state 1 => values[1] => 1x
+        values   = { 1, 5, 10, 15, 20 },
+        callback = function(name, newValue)
+            AnimalWaste.milkMultiplier = newValue
+            log("milk output set to %sx", tostring(newValue))
+        end,
+    },
 }
 
 AnimalWaste.settingsInjected      = false
 AnimalWaste.extraWasteHookInstalled = false
 AnimalWaste.strawBurnHookInstalled  = false
+AnimalWaste.milkHookInstalled       = false
 AnimalWaste.rlPresent             = false
 AnimalWaste.rlVersion        = nil
 AnimalWaste.rlName           = nil
@@ -296,6 +311,91 @@ local function onHourChangedAddExtraStrawBurn(self, currentHour)
 end
 
 
+-- Extra (M-1)x milk -- the independent milkUsageRate multiplier. Mirrors vanilla's
+-- PlaceableHusbandryMilk.updateOutput maths EXACTLY:
+--     liters = productionFactor * globalProductionFactor * litersPerHour[ft] * timeAdjustment
+-- and deposits only the extra (M-1)x. Iterates spec_husbandryMilk.fillTypes (a shed
+-- can output more than one milk fill type) and uses the SAME per-fill-type
+-- spec.litersPerHour[ft] vanilla reads. Under Realistic Livestock that rate is RL's
+-- refreshed per-animal milk output, so scaling it composes with RL as long as we run
+-- LAST (see installMilkHookLast).
+--
+-- We deposit through self:addHusbandryFillLevelFromTool -- the identical call vanilla
+-- uses for the base milk -- so RDM (Realistic Milking Time), which OVERWRITES that
+-- function to buffer FillType.MILK and flush it at 6am/6pm, buffers our extra on the
+-- same schedule. We NEVER touch the updateOutput chain (that is the "mul on number
+-- and nil" globalProductionFactor crash); this is a plain deposit from an
+-- onHourChanged append. Returns total extra litres added across all milk fill types.
+-- Defensive: feature-detects the API, guards the two production factors, pcall-guards
+-- the write. productionFactor<=0 / globalProductionFactor<=0 mean no base milk this
+-- hour, so nothing to scale -- this guard is milk-local (inside the milk maths), NOT
+-- the top-level foodFactor gate that would block manure/straw under RL.
+local function addExtraMilk(self, M, productionFactor, globalProductionFactor, timeAdjustment)
+    local spec = self.spec_husbandryMilk
+    if spec == nil or not spec.hasMilkProduction then return 0 end
+    if spec.fillTypes == nil or spec.litersPerHour == nil then return 0 end
+    if self.addHusbandryFillLevelFromTool == nil then return 0 end
+    if productionFactor == nil or productionFactor <= 0 then return 0 end
+    if globalProductionFactor == nil or globalProductionFactor <= 0 then return 0 end
+
+    local totalAdded = 0
+    for _, fillTypeIndex in ipairs(spec.fillTypes) do
+        local litersPerHour = spec.litersPerHour[fillTypeIndex]
+        if litersPerHour ~= nil and litersPerHour > 0 then
+            local extra = productionFactor * globalProductionFactor * litersPerHour * (M - 1) * timeAdjustment
+            if extra > 0 then
+                local ok = pcall(function()
+                    self:addHusbandryFillLevelFromTool(self:getOwnerFarmId(), extra, fillTypeIndex, nil, nil, nil)
+                end)
+                if ok then
+                    totalAdded = totalAdded + extra
+                    debugLog("  milk fillType=%s litersPerHour=%s -> extra=%.2f",
+                        tostring(fillTypeIndex), tostring(litersPerHour), extra)
+                end
+            end
+        end
+    end
+    return totalAdded
+end
+
+-- Appended to PlaceableHusbandry.onHourChanged, installed LAST from loadMap (see
+-- installMilkHookLast) so it runs AFTER Realistic Livestock's onHourChanged append
+-- has refreshed spec_husbandryMilk.litersPerHour for the hour. Tops up the extra
+-- (M-1)x milk the milkUsageRate multiplier asks for. Independent of the manure and
+-- straw multipliers: gated only on its own multiplier M.
+local function onHourChangedAddExtraMilk(self, currentHour)
+    if not self.isServer then return end
+
+    local M = AnimalWaste.milkMultiplier or 1
+    if M == 1 or not isCowHusbandry(self) then return end
+
+    local husbandrySpec = self.spec_husbandry
+    if husbandrySpec == nil then return end
+
+    -- Milk mirrors vanilla PlaceableHusbandryMilk.updateOutput, which multiplies by
+    -- productionFactor AND globalProductionFactor. Read BOTH locally. We do NOT gate
+    -- the hook on productionFactor<=0 (the guard lives inside addExtraMilk, milk-local
+    -- only). These two factors are the whole open risk under RL: the DEBUG line below
+    -- prints them so an in-game RL test can confirm they are NON-ZERO (else milk would
+    -- silently not scale).
+    local productionFactor = husbandrySpec.productionFactor
+    local globalProductionFactor = husbandrySpec.globalProductionFactor
+
+    local timeAdjustment = (g_currentMission ~= nil and g_currentMission.environment ~= nil
+        and g_currentMission.environment.timeAdjustment) or 1
+
+    local milkAdded = addExtraMilk(self, M, productionFactor, globalProductionFactor, timeAdjustment)
+
+    -- PROOF (per shed per hour, DEBUG-gated): the per-fillType litersPerHour/extra
+    -- lines come from addExtraMilk above; this summary line carries the two RL-risk
+    -- factors and the total milk added.
+    debugLog("extra-milk shed=%s M=%sx productionFactor=%s globalProductionFactor=%s -> milkAdded=%.2f",
+        tostring(self.uniqueId or self), tostring(M),
+        tostring(productionFactor), tostring(globalProductionFactor),
+        milkAdded or 0)
+end
+
+
 -- Install the extra-waste append from loadMap (NOT at mod-load), guarded against
 -- re-entry. Every mod's source -- including Realistic Livestock -- has finished
 -- appending to PlaceableHusbandry.onHourChanged before any loadMap runs, so
@@ -343,6 +443,29 @@ function AnimalWaste:installStrawBurnHookLast()
 end
 
 
+-- Install the milk-scaling append from loadMap (NOT at mod-load), same reasoning as
+-- installExtraWasteHookLast/installStrawBurnHookLast: appending HERE lands us LAST in
+-- the onHourChanged chain, after Realistic Livestock's append has refreshed
+-- spec_husbandryMilk.litersPerHour for the hour, so milkUsageRate scales RL's actual
+-- per-animal milk output rather than a stale/zero value. Still an append, never an
+-- overwrite -- we never become a super-injected link in the updateOutput chain (that
+-- is the "mul on number and nil" crash). Independent of the other two hooks.
+function AnimalWaste:installMilkHookLast()
+    if AnimalWaste.milkHookInstalled then return end
+    if PlaceableHusbandry == nil or PlaceableHusbandry.onHourChanged == nil then
+        Logging.error("[%s] PlaceableHusbandry.onHourChanged missing; mod will not scale milk",
+                      AnimalWaste.MOD_NAME)
+        return
+    end
+
+    PlaceableHusbandry.onHourChanged = Utils.appendedFunction(
+        PlaceableHusbandry.onHourChanged, onHourChangedAddExtraMilk)
+
+    AnimalWaste.milkHookInstalled = true
+    log("milk hook installed LAST at loadMap (runs after RL's onHourChanged append)")
+end
+
+
 -- ---------------------------------------------------------------------
 -- Lifecycle
 -- ---------------------------------------------------------------------
@@ -356,9 +479,11 @@ function AnimalWaste:loadMap(filename)
     -- installExtraWasteHookLast. This is the core of the RL-order fix.
     self:installExtraWasteHookLast()
     self:installStrawBurnHookLast()
+    self:installMilkHookLast()
 
-    log("v%s loaded, multiplier=%sx, straw usage=%sx",
-        AnimalWaste.VERSION, tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier))
+    log("v%s loaded, multiplier=%sx, straw usage=%sx, milk=%sx",
+        AnimalWaste.VERSION, tostring(AnimalWaste.multiplier),
+        tostring(AnimalWaste.strawMultiplier), tostring(AnimalWaste.milkMultiplier))
 end
 
 
@@ -526,7 +651,7 @@ function AnimalWaste.onSettingChanged(_, state, button)
     -- so a change to either slider syncs both. Only the host changes the setting
     -- (client lock is a later task); the host gate makes this a no-op in SP and on
     -- clients.
-    if (name == "husbandryProductionRate" or name == "strawUsageRate")
+    if (name == "husbandryProductionRate" or name == "strawUsageRate" or name == "milkUsageRate")
             and AnimalWaste.isMultiplayerHost() then
         AnimalWasteSettingsEvent.broadcast()
     end
@@ -580,11 +705,13 @@ local function applyOneSyncedSetting(name, state)
 end
 
 -- Client-side: apply states pushed from the server. Clients never re-broadcast.
-function AnimalWaste:applySyncedSettings(rateState, strawState)
+function AnimalWaste:applySyncedSettings(rateState, strawState, milkState)
     applyOneSyncedSetting("husbandryProductionRate", rateState)
     applyOneSyncedSetting("strawUsageRate", strawState)
-    log("settings synced: %sx manure, %sx straw",
-        tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier))
+    applyOneSyncedSetting("milkUsageRate", milkState)
+    log("settings synced: %sx manure, %sx straw, %sx milk",
+        tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier),
+        tostring(AnimalWaste.milkMultiplier))
 end
 
 

@@ -16,5 +16,12 @@
         <text name="aw_settings_strawUsageRate_texts_3"           text="10x"/>
         <text name="aw_settings_strawUsageRate_texts_4"           text="15x"/>
         <text name="aw_settings_strawUsageRate_texts_5"           text="20x"/>
+        <text name="aw_settings_milkUsageRate_label"              text="Milk Output Rate"/>
+        <text name="aw_settings_milkUsageRate_tooltip"            text="Multiplies milk output on your cow sheds, independently of the production and straw rates. Change applies on the next in-game hour."/>
+        <text name="aw_settings_milkUsageRate_texts_1"            text="1x"/>
+        <text name="aw_settings_milkUsageRate_texts_2"            text="5x"/>
+        <text name="aw_settings_milkUsageRate_texts_3"            text="10x"/>
+        <text name="aw_settings_milkUsageRate_texts_4"            text="15x"/>
+        <text name="aw_settings_milkUsageRate_texts_5"            text="20x"/>
     </texts>
 </l10n>
