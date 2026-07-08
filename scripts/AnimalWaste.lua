@@ -14,18 +14,31 @@ AnimalWaste.VERSION  = "1.3.0.0"
 
 -- Current scale factors. Updated by the Settings click callbacks and by
 -- loadFromXML. All default to 1x (pass-through) until they fire.
---   multiplier      -- manure / liquid manure output
---   strawMultiplier -- straw consumption (independent of multiplier)
---   milkMultiplier  -- milk output (independent of both)
+--   multiplier      -- COW manure / liquid manure output
+--   strawMultiplier -- straw consumption          (COW ONLY, independent of multiplier)
+--   milkMultiplier  -- milk output                (COW ONLY, independent of both)
 AnimalWaste.multiplier = 1
 AnimalWaste.strawMultiplier = 1
 AnimalWaste.milkMultiplier = 1
 
--- Diagnostic logging. OFF for normal play. The DEBUG-gated lines are the per-shed
--- hourly extra-waste / straw / milk traces. Flip to true to confirm milk (and
--- manure/straw) scaling in live play -- e.g. once cows are lactating, set this true
--- to watch the extra-milk proof line print productionFactor/globalProductionFactor
--- and the per-hour litres added.
+-- Per-animal-type manure+slurry multipliers (each scales that type's manure AND
+-- liquid manure together, independently of cow). Default 1x (pass-through).
+--   COW    uses the existing AnimalWaste.multiplier above (unchanged).
+--   pigWaste, sheepWaste, horseWaste, chickenWaste  -- one per remaining type.
+-- GOAT is a subType of the SHEEP animal TYPE in RL (there is no GOAT type index and
+-- the scaled rate is a single per-shed aggregate summing sheep+goat animals), so
+-- goats are NOT separable at this layer -- sheepWaste covers sheep AND goats.
+AnimalWaste.pigWaste     = 1
+AnimalWaste.sheepWaste   = 1   -- covers GOAT too (see note above)
+AnimalWaste.horseWaste   = 1
+AnimalWaste.chickenWaste = 1
+
+-- Diagnostic logging. The DEBUG-gated lines are the per-shed hourly extra-waste /
+-- straw / milk traces.
+-- CHECKPOINT 2: OFF for release (kills the hourly per-shed spam). The per-shed
+-- DEBUG line is KEPT in place, just gated -- flip this to true to bring the
+-- per-animal manure/slurry proof (shed, animalType, multiplier, manureAdded,
+-- slurryAdded) back for future diagnosis.
 AnimalWaste.DEBUG = false
 
 -- Must be declared before SETTINGS (FS25 has a global `log` with
@@ -72,6 +85,51 @@ AnimalWaste.SETTINGS = {
             log("milk output set to %sx", tostring(newValue))
         end,
     },
+    -- Per-animal manure+slurry sliders. Each drives the matching field consumed by
+    -- wasteMultiplierForType (PIG/SHEEP/HORSE/CHICKEN). COW keeps its own slider
+    -- (husbandryProductionRate) above -- there is no separate cowWaste. SHEEP covers
+    -- goats (goat is a subType of SHEEP, not separable at this layer). Steps
+    -- 1/5/10/15/20x like straw/milk.
+    ["pigWaste"] = {
+        index    = 5,
+        type     = "MultiTextOption",
+        default  = 1,                  -- 1-based: state 1 => values[1] => 1x
+        values   = { 1, 5, 10, 15, 20 },
+        callback = function(name, newValue)
+            AnimalWaste.pigWaste = newValue
+            log("pig waste set to %sx", tostring(newValue))
+        end,
+    },
+    ["sheepWaste"] = {
+        index    = 6,
+        type     = "MultiTextOption",
+        default  = 1,                  -- 1-based: state 1 => values[1] => 1x
+        values   = { 1, 5, 10, 15, 20 },
+        callback = function(name, newValue)
+            AnimalWaste.sheepWaste = newValue   -- covers GOAT too
+            log("sheep/goat waste set to %sx", tostring(newValue))
+        end,
+    },
+    ["horseWaste"] = {
+        index    = 7,
+        type     = "MultiTextOption",
+        default  = 1,                  -- 1-based: state 1 => values[1] => 1x
+        values   = { 1, 5, 10, 15, 20 },
+        callback = function(name, newValue)
+            AnimalWaste.horseWaste = newValue
+            log("horse waste set to %sx", tostring(newValue))
+        end,
+    },
+    ["chickenWaste"] = {
+        index    = 8,
+        type     = "MultiTextOption",
+        default  = 1,                  -- 1-based: state 1 => values[1] => 1x
+        values   = { 1, 5, 10, 15, 20 },
+        callback = function(name, newValue)
+            AnimalWaste.chickenWaste = newValue
+            log("chicken waste set to %sx", tostring(newValue))
+        end,
+    },
 }
 
 AnimalWaste.settingsInjected      = false
@@ -114,7 +172,11 @@ end
 
 
 -- ---------------------------------------------------------------------
--- Cow-husbandry filter
+-- Husbandry animal-type filter
+--
+-- isCowHusbandry gates the COW-ONLY hooks (straw consumption + milk). The
+-- manure/slurry hook uses the per-type path below instead (getHusbandryTypeName +
+-- wasteMultiplierForType), so pig/horse/sheep/chicken get their own multiplier.
 -- ---------------------------------------------------------------------
 
 local function getCowTypeIndex()
@@ -138,6 +200,32 @@ local function isCowHusbandry(placeable)
     local cowIdx = getCowTypeIndex()
     if cowIdx == nil then return false end
     return spec.animalTypeIndex == cowIdx
+end
+
+-- Uppercase animal-type NAME of a husbandry ("COW"/"PIG"/"SHEEP"/"HORSE"/"CHICKEN"),
+-- resolved from spec_husbandryAnimals.animalTypeIndex via the animal system. Returns
+-- nil if unavailable. Note: a sheep/goat barn is animal TYPE "SHEEP" (goat is only a
+-- subType), so this returns "SHEEP" for both -- goats cannot be split out here.
+local function getHusbandryTypeName(placeable)
+    local spec = placeable and placeable.spec_husbandryAnimals
+    if spec == nil or spec.animalTypeIndex == nil then return nil end
+    local as = g_currentMission and g_currentMission.animalSystem
+    if as == nil or as.types == nil then return nil end
+    local typ = as.types[spec.animalTypeIndex]
+    return typ and typ.name or nil
+end
+
+-- Map an animal-type name to its manure+slurry multiplier. COW reuses the existing
+-- combined multiplier; the rest use their own per-type field. Returns nil for any
+-- type we do not scale (so the hook no-ops on it). SHEEP covers goats.
+local function wasteMultiplierForType(typeName)
+    if typeName == "COW"     then return AnimalWaste.multiplier
+    elseif typeName == "PIG"     then return AnimalWaste.pigWaste
+    elseif typeName == "SHEEP"   then return AnimalWaste.sheepWaste
+    elseif typeName == "HORSE"   then return AnimalWaste.horseWaste
+    elseif typeName == "CHICKEN" then return AnimalWaste.chickenWaste
+    end
+    return nil
 end
 
 
@@ -255,8 +343,14 @@ end
 local function onHourChangedAddExtraWaste(self, currentHour)
     if not self.isServer then return end
 
-    local M = AnimalWaste.multiplier or 1
-    if M == 1 or not isCowHusbandry(self) then return end
+    -- PER-ANIMAL-TYPE gate (was isCowHusbandry): resolve this shed's animal type and
+    -- pick that type's manure+slurry multiplier. Unsupported type -> nil -> no-op;
+    -- 1x -> no-op. Only the manure/slurry hook is widened this way; straw and milk
+    -- stay COW-ONLY. Cow behaviour is unchanged (COW -> AnimalWaste.multiplier).
+    local typeName = getHusbandryTypeName(self)
+    if typeName == nil then return end
+    local M = wasteMultiplierForType(typeName)
+    if M == nil or M == 1 then return end
 
     local husbandrySpec = self.spec_husbandry
     if husbandrySpec == nil then return end
@@ -273,13 +367,17 @@ local function onHourChangedAddExtraWaste(self, currentHour)
     local strawSpec  = self.spec_husbandryStraw
     local liquidSpec = self.spec_husbandryLiquidManure
 
+    -- addExtraManure/addExtraLiquidManure feature-detect their spec and pcall/clamp,
+    -- so a type with no manure/slurry deposit path (sheep/goat/chicken on vanilla
+    -- barns) returns 0 here -- a safe no-op, no error.
     local manureAdded = addExtraManure(self, M, timeAdjustment)
     local liquidAdded = addExtraLiquidManure(self, M, timeAdjustment)
 
-    -- One-off diagnostic (per shed per hour, DEBUG-gated): shows where a zero came
-    -- from before the reorder and that the top-up is non-zero after it.
-    debugLog("extra-waste shed=%s M=%sx foodFactor=%s manureOut/hr=%s slurry/hr=%s -> manureAdded=%.1f slurryAdded=%.1f",
-        tostring(self.uniqueId or self), tostring(M),
+    -- PROOF (per shed per hour, DEBUG-gated): animal type, the multiplier applied,
+    -- the refreshed per-hour rates, and the litres actually added. Pig should scale
+    -- manure+slurry; horse manure only; cow unchanged; sheep/goat/chicken no-op to 0.
+    debugLog("extra-waste shed=%s type=%s M=%sx foodFactor=%s manureOut/hr=%s slurry/hr=%s -> manureAdded=%.1f slurryAdded=%.1f",
+        tostring(self.uniqueId or self), tostring(typeName), tostring(M),
         tostring(husbandrySpec.productionFactor),
         tostring(strawSpec and strawSpec.outputLitersPerHour),
         tostring(liquidSpec and liquidSpec.litersPerHour),
@@ -481,8 +579,9 @@ function AnimalWaste:loadMap(filename)
     self:installStrawBurnHookLast()
     self:installMilkHookLast()
 
-    log("v%s loaded, multiplier=%sx, straw usage=%sx, milk=%sx",
-        AnimalWaste.VERSION, tostring(AnimalWaste.multiplier),
+    log("v%s loaded, cow=%sx, pig=%sx, sheep/goat=%sx, horse=%sx, chicken=%sx (straw=%sx, milk=%sx; cow-only)",
+        AnimalWaste.VERSION, tostring(AnimalWaste.multiplier), tostring(AnimalWaste.pigWaste),
+        tostring(AnimalWaste.sheepWaste), tostring(AnimalWaste.horseWaste), tostring(AnimalWaste.chickenWaste),
         tostring(AnimalWaste.strawMultiplier), tostring(AnimalWaste.milkMultiplier))
 end
 
@@ -648,11 +747,11 @@ function AnimalWaste.onSettingChanged(_, state, button)
 
     -- Multiplayer: if we're the host, push the change out to all clients so
     -- their menus track ours. The event carries every host-authoritative setting,
-    -- so a change to either slider syncs both. Only the host changes the setting
-    -- (client lock is a later task); the host gate makes this a no-op in SP and on
-    -- clients.
-    if (name == "husbandryProductionRate" or name == "strawUsageRate" or name == "milkUsageRate")
-            and AnimalWaste.isMultiplayerHost() then
+    -- so one broadcast syncs all seven sliders. Every entry in SETTINGS is
+    -- host-authoritative, so membership is the gate. Only the host changes the
+    -- setting (client lock is a later task); the host gate makes this a no-op in SP
+    -- and on clients.
+    if AnimalWaste.SETTINGS[name] ~= nil and AnimalWaste.isMultiplayerHost() then
         AnimalWasteSettingsEvent.broadcast()
     end
 end
@@ -705,13 +804,20 @@ local function applyOneSyncedSetting(name, state)
 end
 
 -- Client-side: apply states pushed from the server. Clients never re-broadcast.
-function AnimalWaste:applySyncedSettings(rateState, strawState, milkState)
+function AnimalWaste:applySyncedSettings(rateState, strawState, milkState,
+                                        pigState, sheepState, horseState, chickenState)
     applyOneSyncedSetting("husbandryProductionRate", rateState)
     applyOneSyncedSetting("strawUsageRate", strawState)
     applyOneSyncedSetting("milkUsageRate", milkState)
-    log("settings synced: %sx manure, %sx straw, %sx milk",
+    applyOneSyncedSetting("pigWaste", pigState)
+    applyOneSyncedSetting("sheepWaste", sheepState)
+    applyOneSyncedSetting("horseWaste", horseState)
+    applyOneSyncedSetting("chickenWaste", chickenState)
+    log("settings synced: cow=%sx manure, straw=%sx, milk=%sx; pig=%sx, sheep/goat=%sx, horse=%sx, chicken=%sx",
         tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier),
-        tostring(AnimalWaste.milkMultiplier))
+        tostring(AnimalWaste.milkMultiplier), tostring(AnimalWaste.pigWaste),
+        tostring(AnimalWaste.sheepWaste), tostring(AnimalWaste.horseWaste),
+        tostring(AnimalWaste.chickenWaste))
 end
 
 
