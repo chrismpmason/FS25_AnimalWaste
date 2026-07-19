@@ -593,9 +593,21 @@ end
 -- ---------------------------------------------------------------------
 
 function AnimalWaste:getSaveXMLPath()
-    if g_currentMission == nil or g_currentMission.missionInfo == nil then return nil end
+    -- MP-DIAG (always-on): log WHY the path is nil instead of bailing silently, so
+    -- the tester can see on an MP-host reload whether savegameDirectory is missing.
+    if g_currentMission == nil then
+        log("MP-DIAG getSaveXMLPath: g_currentMission is NIL -> path nil")
+        return nil
+    end
+    if g_currentMission.missionInfo == nil then
+        log("MP-DIAG getSaveXMLPath: g_currentMission.missionInfo is NIL -> path nil")
+        return nil
+    end
     local dir = g_currentMission.missionInfo.savegameDirectory
-    if dir == nil then return nil end
+    if dir == nil then
+        log("MP-DIAG getSaveXMLPath: missionInfo.savegameDirectory is NIL -> path nil (save file cannot be resolved)")
+        return nil
+    end
     return dir .. "/animalWaste.xml"
 end
 
@@ -622,19 +634,49 @@ end
 
 
 function AnimalWaste:loadFromXML()
+    -- === MP PERSISTENCE DIAGNOSTIC (v1.4.0.0, always-on, no fix applied) ========
+    -- Purpose: confirm the MP-host settings-reset cause. loadFromXML runs early
+    -- (from loadMap). If savegameDirectory / the resolved path is nil at this point
+    -- on an MP host, load bails and the settings fall back to defaults (1x) -- even
+    -- though save wrote the file fine later. SP restores correctly. These lines let
+    -- the tester see EXACTLY which branch runs on an MP-host reload vs SP.
+    local dyn      = (g_currentMission ~= nil) and g_currentMission.missionDynamicInfo or nil
+    local isMP     = (dyn ~= nil) and dyn.isMultiplayer or false
+    local isServer = (g_currentMission ~= nil) and g_currentMission.getIsServer ~= nil
+                     and g_currentMission:getIsServer() or false
+    local rawDir   = (g_currentMission ~= nil and g_currentMission.missionInfo ~= nil)
+                     and g_currentMission.missionInfo.savegameDirectory or nil
+    log("MP-DIAG loadFromXML: START multiplayer=%s server/host=%s savegameDirectory=%s",
+        tostring(isMP), tostring(isServer), tostring(rawDir))
+
     local path = self:getSaveXMLPath()
-    if path == nil then return end
-    if not fileExists(path) then
-        log("no saved settings at %s (first run on this savegame; using defaults)", path)
+    log("MP-DIAG loadFromXML: resolved save path = %s", tostring(path))
+
+    if path == nil then
+        -- EXPLICIT bail (was a SILENT return). This is the smoking gun for the
+        -- MP-host reset: no path -> no load -> every slider stays at DEFAULT (1x).
+        log("MP-DIAG loadFromXML: BAILED - path is NIL, nothing loaded; all sliders stay at DEFAULT (1x). "
+            .. "Seeing this on an MP-host reload CONFIRMS load-time savegameDirectory is the cause.")
         return
     end
 
+    if not fileExists(path) then
+        log("MP-DIAG loadFromXML: BAILED - save file NOT FOUND at %s; using DEFAULTS (1x). "
+            .. "Expected on a brand-new savegame; on a reload-after-save it means the file was written elsewhere.",
+            path)
+        return
+    end
+
+    log("MP-DIAG loadFromXML: save file FOUND at %s - reading states...", path)
+
     local xml = loadXMLFile("animalWasteLoad", path)
     if xml == nil or xml == 0 then
+        log("MP-DIAG loadFromXML: BAILED - could not OPEN XML at %s; using DEFAULTS (1x)", path)
         Logging.warning("[%s] could not read save XML at %s", AnimalWaste.MOD_NAME, tostring(path))
         return
     end
 
+    local loadedCount = 0
     for name, setting in pairs(AnimalWaste.SETTINGS) do
         local state = getXMLInt(xml, "animalWaste." .. name .. "#state")
         if state ~= nil and state >= 1 and state <= #setting.values then
@@ -642,11 +684,14 @@ function AnimalWaste:loadFromXML()
             if setting.callback then
                 setting.callback(name, setting.values[state])
             end
+            loadedCount = loadedCount + 1
+            log("MP-DIAG loadFromXML: restored %s -> state %s (%sx)",
+                name, tostring(state), tostring(setting.values[state]))
         end
     end
 
     delete(xml)
-    log("settings loaded from %s", path)
+    log("MP-DIAG loadFromXML: DONE - loaded %s setting(s) from %s", tostring(loadedCount), path)
 end
 
 
