@@ -59,7 +59,7 @@ AnimalWaste.SETTINGS = {
         index    = 1,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 2, 3, 5, 10 },
+        values   = { 1, 2, 3, 5, 10, 20 },
         callback = function(name, newValue)
             AnimalWaste.multiplier = newValue
             log("multiplier set to %sx", tostring(newValue))
@@ -69,7 +69,7 @@ AnimalWaste.SETTINGS = {
         index    = 3,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 5, 10, 15, 20 },
+        values   = { 1, 3, 5, 10, 15, 20 },
         callback = function(name, newValue)
             AnimalWaste.strawMultiplier = newValue
             log("straw usage set to %sx", tostring(newValue))
@@ -79,7 +79,7 @@ AnimalWaste.SETTINGS = {
         index    = 4,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 5, 10, 15, 20 },
+        values   = { 1, 3, 5, 10, 15, 20 },
         callback = function(name, newValue)
             AnimalWaste.milkMultiplier = newValue
             log("milk output set to %sx", tostring(newValue))
@@ -94,7 +94,7 @@ AnimalWaste.SETTINGS = {
         index    = 5,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 5, 10, 15, 20 },
+        values   = { 1, 3, 5, 10, 15, 20 },
         callback = function(name, newValue)
             AnimalWaste.pigWaste = newValue
             log("pig waste set to %sx", tostring(newValue))
@@ -104,7 +104,7 @@ AnimalWaste.SETTINGS = {
         index    = 6,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 5, 10, 15, 20 },
+        values   = { 1, 3, 5, 10, 15, 20 },
         callback = function(name, newValue)
             AnimalWaste.sheepWaste = newValue   -- covers GOAT too
             log("sheep/goat waste set to %sx", tostring(newValue))
@@ -114,7 +114,7 @@ AnimalWaste.SETTINGS = {
         index    = 7,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 5, 10, 15, 20 },
+        values   = { 1, 3, 5, 10, 15, 20 },
         callback = function(name, newValue)
             AnimalWaste.horseWaste = newValue
             log("horse waste set to %sx", tostring(newValue))
@@ -124,7 +124,7 @@ AnimalWaste.SETTINGS = {
         index    = 8,
         type     = "MultiTextOption",
         default  = 1,                  -- 1-based: state 1 => values[1] => 1x
-        values   = { 1, 5, 10, 15, 20 },
+        values   = { 1, 3, 5, 10, 15, 20 },
         callback = function(name, newValue)
             AnimalWaste.chickenWaste = newValue
             log("chicken waste set to %sx", tostring(newValue))

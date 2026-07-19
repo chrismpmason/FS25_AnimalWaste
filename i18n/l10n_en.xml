@@ -2,54 +2,61 @@
 <l10n>
     <texts>
         <text name="aw_settings"                                  text="Animal Waste"/>
-        <text name="aw_settings_husbandryProductionRate_label"    text="Husbandry Production Rate"/>
+        <text name="aw_settings_husbandryProductionRate_label"    text="Cow Husbandry"/>
         <text name="aw_settings_husbandryProductionRate_tooltip"  text="Multiplies manure and liquid manure output (and straw consumption) on your cow sheds. Change applies on the next in-game hour."/>
         <text name="aw_settings_husbandryProductionRate_texts_1"  text="1x"/>
         <text name="aw_settings_husbandryProductionRate_texts_2"  text="2x"/>
         <text name="aw_settings_husbandryProductionRate_texts_3"  text="3x"/>
         <text name="aw_settings_husbandryProductionRate_texts_4"  text="5x"/>
         <text name="aw_settings_husbandryProductionRate_texts_5"  text="10x"/>
+        <text name="aw_settings_husbandryProductionRate_texts_6"  text="20x"/>
         <text name="aw_settings_strawUsageRate_label"             text="Straw Usage Rate"/>
         <text name="aw_settings_strawUsageRate_tooltip"           text="Multiplies how much straw your cow sheds consume as bedding, independently of the production rate. Change applies on the next in-game hour."/>
         <text name="aw_settings_strawUsageRate_texts_1"           text="1x"/>
-        <text name="aw_settings_strawUsageRate_texts_2"           text="5x"/>
-        <text name="aw_settings_strawUsageRate_texts_3"           text="10x"/>
-        <text name="aw_settings_strawUsageRate_texts_4"           text="15x"/>
-        <text name="aw_settings_strawUsageRate_texts_5"           text="20x"/>
+        <text name="aw_settings_strawUsageRate_texts_2"           text="3x"/>
+        <text name="aw_settings_strawUsageRate_texts_3"           text="5x"/>
+        <text name="aw_settings_strawUsageRate_texts_4"           text="10x"/>
+        <text name="aw_settings_strawUsageRate_texts_5"           text="15x"/>
+        <text name="aw_settings_strawUsageRate_texts_6"           text="20x"/>
         <text name="aw_settings_milkUsageRate_label"              text="Milk Output Rate"/>
         <text name="aw_settings_milkUsageRate_tooltip"            text="Multiplies milk output on your cow sheds, independently of the production and straw rates. Change applies on the next in-game hour."/>
         <text name="aw_settings_milkUsageRate_texts_1"            text="1x"/>
-        <text name="aw_settings_milkUsageRate_texts_2"            text="5x"/>
-        <text name="aw_settings_milkUsageRate_texts_3"            text="10x"/>
-        <text name="aw_settings_milkUsageRate_texts_4"            text="15x"/>
-        <text name="aw_settings_milkUsageRate_texts_5"            text="20x"/>
+        <text name="aw_settings_milkUsageRate_texts_2"            text="3x"/>
+        <text name="aw_settings_milkUsageRate_texts_3"            text="5x"/>
+        <text name="aw_settings_milkUsageRate_texts_4"            text="10x"/>
+        <text name="aw_settings_milkUsageRate_texts_5"            text="15x"/>
+        <text name="aw_settings_milkUsageRate_texts_6"            text="20x"/>
         <text name="aw_settings_pigWaste_label"                   text="Pig Waste Rate"/>
         <text name="aw_settings_pigWaste_tooltip"                 text="Multiplies manure and liquid manure (slurry) output on your pig sheds, independently of the cow rates. Change applies on the next in-game hour."/>
         <text name="aw_settings_pigWaste_texts_1"                 text="1x"/>
-        <text name="aw_settings_pigWaste_texts_2"                 text="5x"/>
-        <text name="aw_settings_pigWaste_texts_3"                 text="10x"/>
-        <text name="aw_settings_pigWaste_texts_4"                 text="15x"/>
-        <text name="aw_settings_pigWaste_texts_5"                 text="20x"/>
+        <text name="aw_settings_pigWaste_texts_2"                 text="3x"/>
+        <text name="aw_settings_pigWaste_texts_3"                 text="5x"/>
+        <text name="aw_settings_pigWaste_texts_4"                 text="10x"/>
+        <text name="aw_settings_pigWaste_texts_5"                 text="15x"/>
+        <text name="aw_settings_pigWaste_texts_6"                 text="20x"/>
         <text name="aw_settings_sheepWaste_label"                 text="Sheep &amp; Goat Waste Rate"/>
         <text name="aw_settings_sheepWaste_tooltip"               text="Multiplies manure output on your sheep and goat pastures (goats share this slider), independently of the cow rates. Change applies on the next in-game hour."/>
         <text name="aw_settings_sheepWaste_texts_1"               text="1x"/>
-        <text name="aw_settings_sheepWaste_texts_2"               text="5x"/>
-        <text name="aw_settings_sheepWaste_texts_3"               text="10x"/>
-        <text name="aw_settings_sheepWaste_texts_4"               text="15x"/>
-        <text name="aw_settings_sheepWaste_texts_5"               text="20x"/>
+        <text name="aw_settings_sheepWaste_texts_2"               text="3x"/>
+        <text name="aw_settings_sheepWaste_texts_3"               text="5x"/>
+        <text name="aw_settings_sheepWaste_texts_4"               text="10x"/>
+        <text name="aw_settings_sheepWaste_texts_5"               text="15x"/>
+        <text name="aw_settings_sheepWaste_texts_6"               text="20x"/>
         <text name="aw_settings_horseWaste_label"                 text="Horse Waste Rate"/>
         <text name="aw_settings_horseWaste_tooltip"               text="Multiplies manure output on your horse pastures, independently of the cow rates. Change applies on the next in-game hour."/>
         <text name="aw_settings_horseWaste_texts_1"               text="1x"/>
-        <text name="aw_settings_horseWaste_texts_2"               text="5x"/>
-        <text name="aw_settings_horseWaste_texts_3"               text="10x"/>
-        <text name="aw_settings_horseWaste_texts_4"               text="15x"/>
-        <text name="aw_settings_horseWaste_texts_5"               text="20x"/>
+        <text name="aw_settings_horseWaste_texts_2"               text="3x"/>
+        <text name="aw_settings_horseWaste_texts_3"               text="5x"/>
+        <text name="aw_settings_horseWaste_texts_4"               text="10x"/>
+        <text name="aw_settings_horseWaste_texts_5"               text="15x"/>
+        <text name="aw_settings_horseWaste_texts_6"               text="20x"/>
         <text name="aw_settings_chickenWaste_label"               text="Chicken Waste Rate"/>
         <text name="aw_settings_chickenWaste_tooltip"             text="Multiplies manure output on your chicken coops, independently of the cow rates. Change applies on the next in-game hour."/>
         <text name="aw_settings_chickenWaste_texts_1"             text="1x"/>
-        <text name="aw_settings_chickenWaste_texts_2"             text="5x"/>
-        <text name="aw_settings_chickenWaste_texts_3"             text="10x"/>
-        <text name="aw_settings_chickenWaste_texts_4"             text="15x"/>
-        <text name="aw_settings_chickenWaste_texts_5"             text="20x"/>
+        <text name="aw_settings_chickenWaste_texts_2"             text="3x"/>
+        <text name="aw_settings_chickenWaste_texts_3"             text="5x"/>
+        <text name="aw_settings_chickenWaste_texts_4"             text="10x"/>
+        <text name="aw_settings_chickenWaste_texts_5"             text="15x"/>
+        <text name="aw_settings_chickenWaste_texts_6"             text="20x"/>
     </texts>
 </l10n>
