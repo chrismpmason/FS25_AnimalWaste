@@ -613,28 +613,75 @@ end
 
 
 function AnimalWaste:saveToXML()
+    -- === MP SAVE-SIDE DIAGNOSTIC (always-on, FIX APPLIED) ======================
+    -- Kept from the diagnostic build that proved the cause, so the tester can now
+    -- confirm the fix from the same log lines.
+    --
+    -- The cause: loadFromXML on a dedicated server was proved CORRECT (path
+    -- resolves, file found, all 7 states read) -- but every state read back as 1
+    -- (default), because the process WRITING the file was holding defaults. The
+    -- only source saveToXML has is setting.state, and on a headless server the
+    -- menu paths that assign it never run, so the admin's slider change never
+    -- reached the server's authoritative state.
+    --
+    -- The fix: an admin's change is now sent to the server as a REQUEST event
+    -- (AnimalWaste.handleAdminChangeRequest), which sets setting.state in the
+    -- SERVER process before saving.
+    --
+    -- BEFORE the fix, a dedicated server printed: settingsUIInjected=false and
+    -- every row "state=nil -> DEFAULT(state=nil)" at 1x.
+    -- AFTER the fix, expect: settingsUIInjected still false (a headless server has
+    -- no menu -- that is correct and not the bug), but every row the admin changed
+    -- now reads "from state" at the REAL value, preceded by the
+    -- "handleAdminChangeRequest: ACCEPTED" lines.
+    local dyn      = (g_currentMission ~= nil) and g_currentMission.missionDynamicInfo or nil
+    local isMP     = (dyn ~= nil) and dyn.isMultiplayer or false
+    local isServer = (g_currentMission ~= nil) and g_currentMission.getIsServer ~= nil
+                     and g_currentMission:getIsServer() or false
+    local isDedi   = _G["g_dedicatedServer"] ~= nil
+    log("MP-DIAG saveToXML: START multiplayer=%s server/host=%s dedicated=%s settingsUIInjected=%s "
+        .. "(live values: cow=%sx straw=%sx milk=%sx pig=%sx sheep=%sx horse=%sx chicken=%sx)",
+        tostring(isMP), tostring(isServer), tostring(isDedi), tostring(AnimalWaste.settingsInjected),
+        tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier),
+        tostring(AnimalWaste.milkMultiplier), tostring(AnimalWaste.pigWaste),
+        tostring(AnimalWaste.sheepWaste), tostring(AnimalWaste.horseWaste),
+        tostring(AnimalWaste.chickenWaste))
+
     local path = self:getSaveXMLPath()
-    if path == nil then return end
+    log("MP-DIAG saveToXML: resolved save path = %s", tostring(path))
+    if path == nil then
+        log("MP-DIAG saveToXML: BAILED - path is NIL, nothing written")
+        return
+    end
 
     local xml = createXMLFile("animalWasteSave", path, "animalWaste")
     if xml == nil or xml == 0 then
+        log("MP-DIAG saveToXML: BAILED - createXMLFile FAILED at %s", tostring(path))
         Logging.warning("[%s] could not create save XML at %s", AnimalWaste.MOD_NAME, tostring(path))
         return
     end
 
     setXMLInt(xml, "animalWaste#version", 1)
     for name, setting in pairs(AnimalWaste.SETTINGS) do
-        setXMLInt(xml, "animalWaste." .. name .. "#state", setting.state or setting.default)
+        -- SOURCE is the whole question: "state" means this process actually holds the
+        -- admin's chosen value; "DEFAULT(state=nil)" means it never received one and
+        -- is about to persist 1x over the top of whatever the admin picked.
+        local written = setting.state or setting.default
+        local source  = (setting.state ~= nil) and "state" or "DEFAULT(state=nil)"
+        log("MP-DIAG saveToXML: writing %s -> state %s (%sx) from %s [element=%s]",
+            name, tostring(written), tostring(setting.values[written]), source,
+            (setting.element ~= nil) and "present" or "nil")
+        setXMLInt(xml, "animalWaste." .. name .. "#state", written)
     end
 
     saveXMLFile(xml)
     delete(xml)
-    log("settings saved to %s", path)
+    log("MP-DIAG saveToXML: DONE - settings saved to %s", path)
 end
 
 
 function AnimalWaste:loadFromXML()
-    -- === MP PERSISTENCE DIAGNOSTIC (v1.4.0.0, always-on, no fix applied) ========
+    -- === MP PERSISTENCE DIAGNOSTIC (always-on; load path itself unchanged) ======
     -- Purpose: confirm the MP-host settings-reset cause. loadFromXML runs early
     -- (from loadMap). If savegameDirectory / the resolved path is nil at this point
     -- on an MP host, load bails and the settings fall back to defaults (1x) -- even
@@ -730,7 +777,9 @@ function AnimalWaste.initSettings()
 
     sectionHeader:setText(g_i18n:getText("aw_settings"))
 
-    -- Editable on single-player and on the MP host; read-only on an MP client.
+    -- Editable in single-player, on the MP host, and for an MP admin (master user);
+    -- read-only for an ordinary MP client. Re-checked on every page open by
+    -- refreshSettingEditability, since admin status can change mid-session.
     local canEdit = AnimalWaste.isSettingEditable()
 
     for name, setting in pairs(AnimalWaste.SETTINGS) do
@@ -774,7 +823,7 @@ function AnimalWaste.initSettings()
     end
 
     AnimalWaste.settingsInjected = true
-    log("settings injected (host=%s)", tostring(canEdit))
+    log("settings injected (editable=%s)", tostring(canEdit))
 end
 
 
@@ -787,16 +836,35 @@ function AnimalWaste.onSettingChanged(_, state, button)
     local setting = AnimalWaste.SETTINGS[name]
     if setting == nil then return end
 
+    -- Multiplayer client that is NOT the server (e.g. the admin on a DEDICATED
+    -- server): the simulation and the savegame live on the server, so we cannot
+    -- apply or persist here. Route the change as a request; the server verifies our
+    -- admin rights, then applies + persists + broadcasts the values back to us (and
+    -- everyone) as a sync. We set setting.state optimistically so the row keeps the
+    -- number the player just picked, but deliberately do NOT run the callback and do
+    -- NOT broadcast -- the returning sync is what applies the value for real, so
+    -- there is exactly one application per change. SP and the listen-server host
+    -- fall through to the original path below, unchanged.
+    --
+    -- This branch is keyed on SETTINGS membership, not on any single setting name,
+    -- so all seven sliders take it.
+    if not AnimalWaste.isServerSide()
+            and g_currentMission ~= nil
+            and g_currentMission.missionDynamicInfo ~= nil
+            and g_currentMission.missionDynamicInfo.isMultiplayer then
+        setting.state = state  -- optimistic; the server's sync will confirm/correct
+        AnimalWasteSettingsEvent.sendChangeRequest()
+        return
+    end
+
     setting.state = state
     if setting.callback then setting.callback(name, setting.values[state]) end
 
     -- Multiplayer: if we're the host, push the change out to all clients so
-    -- their menus track ours. The event carries every host-authoritative setting,
-    -- so one broadcast syncs all seven sliders. Every entry in SETTINGS is
-    -- host-authoritative, so membership is the gate. Only the host changes the
-    -- setting (client lock is a later task); the host gate makes this a no-op in SP
-    -- and on clients.
-    if AnimalWaste.SETTINGS[name] ~= nil and AnimalWaste.isMultiplayerHost() then
+    -- their menus track ours. The event carries every server-authoritative setting,
+    -- so one broadcast syncs all seven sliders. The host gate makes this a no-op
+    -- in SP.
+    if AnimalWaste.isMultiplayerHost() then
         AnimalWasteSettingsEvent.broadcast()
     end
 end
@@ -818,15 +886,101 @@ function AnimalWaste.isMultiplayerHost()
 end
 
 
--- True where it is safe to CHANGE the setting: single-player, or the MP host.
--- False on an MP client -- the setting is host-authoritative, so a client edit
--- would not broadcast and would desync the session. The client still SEES the
--- control (read-only); only its interactivity is gated here.
+-- True wherever the simulation runs: single-player, or the server in MP (listen
+-- host or dedicated). The multiplier values and the savegame are server-side, so
+-- every authoritative apply and every persist is gated on this; a client routes
+-- its intent through AnimalWasteSettingsEvent instead.
+function AnimalWaste.isServerSide()
+    return g_currentMission ~= nil
+        and g_currentMission.getIsServer ~= nil
+        and g_currentMission:getIsServer()
+end
+
+
+-- True where the LOCAL player may CHANGE a setting:
+--   * single-player                              -> always
+--   * the listen-server host (we are the server) -> always (applies locally)
+--   * a multiplayer ADMIN / master user          -> yes; the change is routed to
+--     the server, which re-verifies admin rights before applying. This is what
+--     unlocks the sliders on a DEDICATED server, where no connected player is the
+--     server so the old getIsServer() gate left everyone read-only -- and so the
+--     admin's choice never reached the state saveToXML persists.
+-- Ordinary (non-admin) clients stay read-only: they SEE the controls but disabled,
+-- showing the values synced from the server.
 function AnimalWaste.isSettingEditable()
     if g_currentMission == nil then return true end
     local dyn = g_currentMission.missionDynamicInfo
     if dyn == nil or not dyn.isMultiplayer then return true end  -- single-player
-    return g_currentMission.getIsServer ~= nil and g_currentMission:getIsServer()
+
+    -- Listen-server host / any context where we ARE the server.
+    if AnimalWaste.isServerSide() then return true end
+
+    -- Multiplayer admin (master user). g_currentMission.isMasterUser is the
+    -- engine's local admin flag (the same one the base game pairs with
+    -- getIsServer() for admin-gated actions).
+    return g_currentMission.isMasterUser == true
+end
+
+
+-- Server-side: handle a settings change REQUEST from a client (sent by
+-- AnimalWasteSettingsEvent when an admin moves any slider). The client is NOT
+-- trusted: we resolve the sending connection to its User and require master-user
+-- (admin) rights before applying. On accept we apply every setting, persist via
+-- the same animalWaste.xml save path, and broadcast the authoritative values to
+-- all clients. Non-admin requests are logged and dropped.
+--
+-- This is the missing link for a dedicated server: it is the ONLY path by which
+-- an admin's menu change reaches setting.state in the server process, which is
+-- the value saveToXML writes.
+function AnimalWaste.handleAdminChangeRequest(connection, states)
+    if not AnimalWaste.isServerSide() then return end
+
+    local userManager = g_currentMission ~= nil and g_currentMission.userManager
+    local user = userManager ~= nil and userManager:getUserByConnection(connection) or nil
+    if user == nil or not user:getIsMasterUser() then
+        log("MP-DIAG handleAdminChangeRequest: REJECTED - sender is not a master user (admin); nothing applied")
+        Logging.warning("[%s] rejected settings change request from a non-admin client",
+                        AnimalWaste.MOD_NAME)
+        return
+    end
+
+    if states == nil then return end
+
+    local applied = 0
+    for name, setting in pairs(AnimalWaste.SETTINGS) do
+        local state = states[name]
+        if state ~= nil and state >= 1 and state <= #setting.values then
+            setting.state = state
+            if setting.callback then setting.callback(name, setting.values[state]) end
+            applied = applied + 1
+            log("MP-DIAG handleAdminChangeRequest: applied %s -> state %s (%sx) on the SERVER",
+                name, tostring(state), tostring(setting.values[state]))
+        end
+    end
+
+    -- Persist on the server (its savegame is the authority) and sync everyone,
+    -- including the requesting admin -- whose optimistic local value is confirmed
+    -- (or corrected) by the sync that comes back.
+    log("MP-DIAG handleAdminChangeRequest: ACCEPTED %s setting(s) from admin; persisting + broadcasting", tostring(applied))
+    AnimalWaste:saveToXML()
+    AnimalWasteSettingsEvent.broadcast()
+end
+
+
+-- Re-evaluate editability every time the settings page opens, so a player whose
+-- admin status changed since the rows were first built (e.g. logged in as admin on
+-- a dedicated server) gets the controls enabled/disabled correctly. initSettings
+-- only runs once; this runs on every open. Cheap and regression-safe: in SP and on
+-- the host canEdit is always true, so nothing changes for them.
+function AnimalWaste.refreshSettingEditability()
+    if not AnimalWaste.settingsInjected then return end
+    local canEdit = AnimalWaste.isSettingEditable()
+    for _, setting in pairs(AnimalWaste.SETTINGS) do
+        if setting.element ~= nil then
+            setting.element:setVisible(true)
+            setting.element:setDisabled(not canEdit)
+        end
+    end
 end
 
 
@@ -848,16 +1002,13 @@ local function applyOneSyncedSetting(name, state)
     end
 end
 
--- Client-side: apply states pushed from the server. Clients never re-broadcast.
-function AnimalWaste:applySyncedSettings(rateState, strawState, milkState,
-                                        pigState, sheepState, horseState, chickenState)
-    applyOneSyncedSetting("husbandryProductionRate", rateState)
-    applyOneSyncedSetting("strawUsageRate", strawState)
-    applyOneSyncedSetting("milkUsageRate", milkState)
-    applyOneSyncedSetting("pigWaste", pigState)
-    applyOneSyncedSetting("sheepWaste", sheepState)
-    applyOneSyncedSetting("horseWaste", horseState)
-    applyOneSyncedSetting("chickenWaste", chickenState)
+-- Client-side: apply states pushed from the server, as a name-keyed table.
+-- Clients never re-broadcast.
+function AnimalWaste:applySyncedSettings(states)
+    if states == nil then return end
+    for name in pairs(AnimalWaste.SETTINGS) do
+        applyOneSyncedSetting(name, states[name])
+    end
     log("settings synced: cow=%sx manure, straw=%sx, milk=%sx; pig=%sx, sheep/goat=%sx, horse=%sx, chicken=%sx",
         tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier),
         tostring(AnimalWaste.milkMultiplier), tostring(AnimalWaste.pigWaste),
@@ -878,24 +1029,40 @@ if InGameMenuSettingsFrame ~= nil then
     if InGameMenuSettingsFrame.onFrameOpen ~= nil then
         InGameMenuSettingsFrame.onFrameOpen = Utils.appendedFunction(
             InGameMenuSettingsFrame.onFrameOpen,
-            function(self) AnimalWaste.initSettings() end)
+            function(self)
+                AnimalWaste.initSettings()
+                -- Runs on EVERY open, unlike initSettings: picks up an admin who
+                -- logged in mid-session and unlocks their sliders.
+                AnimalWaste.refreshSettingEditability()
+            end)
     else
         Logging.error("[%s] InGameMenuSettingsFrame.onFrameOpen missing; settings UI cannot install",
                       AnimalWaste.MOD_NAME)
     end
 
+    -- Save only where the savegame actually lives. On an MP client this used to
+    -- fire too; the client holds no authoritative state, so letting it run could
+    -- only ever write a stale or optimistic value (and muddied the save-side
+    -- diagnostic). True in SP and on the listen host, so neither changes.
     if InGameMenuSettingsFrame.onFrameClose ~= nil then
         InGameMenuSettingsFrame.onFrameClose = Utils.appendedFunction(
             InGameMenuSettingsFrame.onFrameClose,
-            function(self) AnimalWaste:saveToXML() end)
+            function(self)
+                if not AnimalWaste.isServerSide() then return end
+                AnimalWaste:saveToXML()
+            end)
     end
 end
 
 -- Belt-and-braces save on game-save (catches quit paths that skip onFrameClose).
+-- Server-side only, for the same reason as above.
 if FSBaseMission ~= nil and FSBaseMission.saveSavegame ~= nil then
     FSBaseMission.saveSavegame = Utils.appendedFunction(
         FSBaseMission.saveSavegame,
-        function(self) AnimalWaste:saveToXML() end)
+        function(self)
+            if not AnimalWaste.isServerSide() then return end
+            AnimalWaste:saveToXML()
+        end)
 end
 
 -- Multiplayer join sync: when a client finishes loading on the server, push the
