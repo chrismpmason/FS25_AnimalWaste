@@ -593,137 +593,48 @@ end
 -- ---------------------------------------------------------------------
 
 function AnimalWaste:getSaveXMLPath()
-    -- MP-DIAG (always-on): log WHY the path is nil instead of bailing silently, so
-    -- the tester can see on an MP-host reload whether savegameDirectory is missing.
-    if g_currentMission == nil then
-        log("MP-DIAG getSaveXMLPath: g_currentMission is NIL -> path nil")
-        return nil
-    end
-    if g_currentMission.missionInfo == nil then
-        log("MP-DIAG getSaveXMLPath: g_currentMission.missionInfo is NIL -> path nil")
-        return nil
-    end
+    if g_currentMission == nil or g_currentMission.missionInfo == nil then return nil end
     local dir = g_currentMission.missionInfo.savegameDirectory
-    if dir == nil then
-        log("MP-DIAG getSaveXMLPath: missionInfo.savegameDirectory is NIL -> path nil (save file cannot be resolved)")
-        return nil
-    end
+    if dir == nil then return nil end
     return dir .. "/animalWaste.xml"
 end
 
 
 function AnimalWaste:saveToXML()
-    -- === MP SAVE-SIDE DIAGNOSTIC (always-on, FIX APPLIED) ======================
-    -- Kept from the diagnostic build that proved the cause, so the tester can now
-    -- confirm the fix from the same log lines.
-    --
-    -- The cause: loadFromXML on a dedicated server was proved CORRECT (path
-    -- resolves, file found, all 7 states read) -- but every state read back as 1
-    -- (default), because the process WRITING the file was holding defaults. The
-    -- only source saveToXML has is setting.state, and on a headless server the
-    -- menu paths that assign it never run, so the admin's slider change never
-    -- reached the server's authoritative state.
-    --
-    -- The fix: an admin's change is now sent to the server as a REQUEST event
-    -- (AnimalWaste.handleAdminChangeRequest), which sets setting.state in the
-    -- SERVER process before saving.
-    --
-    -- BEFORE the fix, a dedicated server printed: settingsUIInjected=false and
-    -- every row "state=nil -> DEFAULT(state=nil)" at 1x.
-    -- AFTER the fix, expect: settingsUIInjected still false (a headless server has
-    -- no menu -- that is correct and not the bug), but every row the admin changed
-    -- now reads "from state" at the REAL value, preceded by the
-    -- "handleAdminChangeRequest: ACCEPTED" lines.
-    local dyn      = (g_currentMission ~= nil) and g_currentMission.missionDynamicInfo or nil
-    local isMP     = (dyn ~= nil) and dyn.isMultiplayer or false
-    local isServer = (g_currentMission ~= nil) and g_currentMission.getIsServer ~= nil
-                     and g_currentMission:getIsServer() or false
-    local isDedi   = _G["g_dedicatedServer"] ~= nil
-    log("MP-DIAG saveToXML: START multiplayer=%s server/host=%s dedicated=%s settingsUIInjected=%s "
-        .. "(live values: cow=%sx straw=%sx milk=%sx pig=%sx sheep=%sx horse=%sx chicken=%sx)",
-        tostring(isMP), tostring(isServer), tostring(isDedi), tostring(AnimalWaste.settingsInjected),
-        tostring(AnimalWaste.multiplier), tostring(AnimalWaste.strawMultiplier),
-        tostring(AnimalWaste.milkMultiplier), tostring(AnimalWaste.pigWaste),
-        tostring(AnimalWaste.sheepWaste), tostring(AnimalWaste.horseWaste),
-        tostring(AnimalWaste.chickenWaste))
-
     local path = self:getSaveXMLPath()
-    log("MP-DIAG saveToXML: resolved save path = %s", tostring(path))
-    if path == nil then
-        log("MP-DIAG saveToXML: BAILED - path is NIL, nothing written")
-        return
-    end
+    if path == nil then return end
 
     local xml = createXMLFile("animalWasteSave", path, "animalWaste")
     if xml == nil or xml == 0 then
-        log("MP-DIAG saveToXML: BAILED - createXMLFile FAILED at %s", tostring(path))
         Logging.warning("[%s] could not create save XML at %s", AnimalWaste.MOD_NAME, tostring(path))
         return
     end
 
     setXMLInt(xml, "animalWaste#version", 1)
     for name, setting in pairs(AnimalWaste.SETTINGS) do
-        -- SOURCE is the whole question: "state" means this process actually holds the
-        -- admin's chosen value; "DEFAULT(state=nil)" means it never received one and
-        -- is about to persist 1x over the top of whatever the admin picked.
-        local written = setting.state or setting.default
-        local source  = (setting.state ~= nil) and "state" or "DEFAULT(state=nil)"
-        log("MP-DIAG saveToXML: writing %s -> state %s (%sx) from %s [element=%s]",
-            name, tostring(written), tostring(setting.values[written]), source,
-            (setting.element ~= nil) and "present" or "nil")
-        setXMLInt(xml, "animalWaste." .. name .. "#state", written)
+        setXMLInt(xml, "animalWaste." .. name .. "#state", setting.state or setting.default)
     end
 
     saveXMLFile(xml)
     delete(xml)
-    log("MP-DIAG saveToXML: DONE - settings saved to %s", path)
+    log("settings saved to %s", path)
 end
 
 
 function AnimalWaste:loadFromXML()
-    -- === MP PERSISTENCE DIAGNOSTIC (always-on; load path itself unchanged) ======
-    -- Purpose: confirm the MP-host settings-reset cause. loadFromXML runs early
-    -- (from loadMap). If savegameDirectory / the resolved path is nil at this point
-    -- on an MP host, load bails and the settings fall back to defaults (1x) -- even
-    -- though save wrote the file fine later. SP restores correctly. These lines let
-    -- the tester see EXACTLY which branch runs on an MP-host reload vs SP.
-    local dyn      = (g_currentMission ~= nil) and g_currentMission.missionDynamicInfo or nil
-    local isMP     = (dyn ~= nil) and dyn.isMultiplayer or false
-    local isServer = (g_currentMission ~= nil) and g_currentMission.getIsServer ~= nil
-                     and g_currentMission:getIsServer() or false
-    local rawDir   = (g_currentMission ~= nil and g_currentMission.missionInfo ~= nil)
-                     and g_currentMission.missionInfo.savegameDirectory or nil
-    log("MP-DIAG loadFromXML: START multiplayer=%s server/host=%s savegameDirectory=%s",
-        tostring(isMP), tostring(isServer), tostring(rawDir))
-
     local path = self:getSaveXMLPath()
-    log("MP-DIAG loadFromXML: resolved save path = %s", tostring(path))
-
-    if path == nil then
-        -- EXPLICIT bail (was a SILENT return). This is the smoking gun for the
-        -- MP-host reset: no path -> no load -> every slider stays at DEFAULT (1x).
-        log("MP-DIAG loadFromXML: BAILED - path is NIL, nothing loaded; all sliders stay at DEFAULT (1x). "
-            .. "Seeing this on an MP-host reload CONFIRMS load-time savegameDirectory is the cause.")
-        return
-    end
-
+    if path == nil then return end
     if not fileExists(path) then
-        log("MP-DIAG loadFromXML: BAILED - save file NOT FOUND at %s; using DEFAULTS (1x). "
-            .. "Expected on a brand-new savegame; on a reload-after-save it means the file was written elsewhere.",
-            path)
+        log("no saved settings at %s (first run on this savegame; using defaults)", path)
         return
     end
-
-    log("MP-DIAG loadFromXML: save file FOUND at %s - reading states...", path)
 
     local xml = loadXMLFile("animalWasteLoad", path)
     if xml == nil or xml == 0 then
-        log("MP-DIAG loadFromXML: BAILED - could not OPEN XML at %s; using DEFAULTS (1x)", path)
         Logging.warning("[%s] could not read save XML at %s", AnimalWaste.MOD_NAME, tostring(path))
         return
     end
 
-    local loadedCount = 0
     for name, setting in pairs(AnimalWaste.SETTINGS) do
         local state = getXMLInt(xml, "animalWaste." .. name .. "#state")
         if state ~= nil and state >= 1 and state <= #setting.values then
@@ -731,14 +642,11 @@ function AnimalWaste:loadFromXML()
             if setting.callback then
                 setting.callback(name, setting.values[state])
             end
-            loadedCount = loadedCount + 1
-            log("MP-DIAG loadFromXML: restored %s -> state %s (%sx)",
-                name, tostring(state), tostring(setting.values[state]))
         end
     end
 
     delete(xml)
-    log("MP-DIAG loadFromXML: DONE - loaded %s setting(s) from %s", tostring(loadedCount), path)
+    log("settings loaded from %s", path)
 end
 
 
@@ -938,7 +846,6 @@ function AnimalWaste.handleAdminChangeRequest(connection, states)
     local userManager = g_currentMission ~= nil and g_currentMission.userManager
     local user = userManager ~= nil and userManager:getUserByConnection(connection) or nil
     if user == nil or not user:getIsMasterUser() then
-        log("MP-DIAG handleAdminChangeRequest: REJECTED - sender is not a master user (admin); nothing applied")
         Logging.warning("[%s] rejected settings change request from a non-admin client",
                         AnimalWaste.MOD_NAME)
         return
@@ -953,15 +860,14 @@ function AnimalWaste.handleAdminChangeRequest(connection, states)
             setting.state = state
             if setting.callback then setting.callback(name, setting.values[state]) end
             applied = applied + 1
-            log("MP-DIAG handleAdminChangeRequest: applied %s -> state %s (%sx) on the SERVER",
-                name, tostring(state), tostring(setting.values[state]))
         end
     end
 
     -- Persist on the server (its savegame is the authority) and sync everyone,
     -- including the requesting admin -- whose optimistic local value is confirmed
     -- (or corrected) by the sync that comes back.
-    log("MP-DIAG handleAdminChangeRequest: ACCEPTED %s setting(s) from admin; persisting + broadcasting", tostring(applied))
+    log("admin settings change accepted: %s setting(s) applied, persisted and broadcast",
+        tostring(applied))
     AnimalWaste:saveToXML()
     AnimalWasteSettingsEvent.broadcast()
 end
@@ -1042,8 +948,8 @@ if InGameMenuSettingsFrame ~= nil then
 
     -- Save only where the savegame actually lives. On an MP client this used to
     -- fire too; the client holds no authoritative state, so letting it run could
-    -- only ever write a stale or optimistic value (and muddied the save-side
-    -- diagnostic). True in SP and on the listen host, so neither changes.
+    -- only ever write a stale or optimistic value. True in SP and on the listen
+    -- host, so neither changes.
     if InGameMenuSettingsFrame.onFrameClose ~= nil then
         InGameMenuSettingsFrame.onFrameClose = Utils.appendedFunction(
             InGameMenuSettingsFrame.onFrameClose,
